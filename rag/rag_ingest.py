@@ -23,8 +23,8 @@ import json
 import re
 import statistics
 
-from rag_common import (CHROMA_DIR, COLLECTION, DOC_PREFIX, MANUAL_PATH,
-                        approx_tokens, embed)
+from rag_common import (CHROMA_DIR, COLLECTION, DEFAULT_COLLECTION, DEFAULT_MANUAL,
+                        DOC_PREFIX, MANUAL_PATH, approx_tokens, embed)
 
 CHUNKING_VERSION = "v3"
 MIN_TOKENS = 400
@@ -322,6 +322,10 @@ def main():
         print(f"Dumped chunks to {args.dump}")
     if args.stats_only:
         return
+
+    if COLLECTION == DEFAULT_COLLECTION and MANUAL_PATH.resolve() != DEFAULT_MANUAL.resolve():
+        raise SystemExit(f"Refusing to rebuild '{COLLECTION}' from {MANUAL_PATH}: "
+                         "set RAG_COLLECTION to a new name for a different manual.")
 
     import chromadb
     import ollama

@@ -119,7 +119,8 @@ def ask_rag(question: str, k: int = TOP_K, mode: str = "hybrid") -> dict:
     )
     t2 = time.perf_counter()
 
-    answer = re.sub(r"<think>.*?</think>", "", resp["message"]["content"], flags=re.S).strip()
+    content = resp["message"]["content"]          # untouched model output
+    answer = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
     not_found = NOT_FOUND in answer.upper()
     retrieved_pages = _ordered_pages(hits)
     return {
@@ -127,11 +128,16 @@ def ask_rag(question: str, k: int = TOP_K, mode: str = "hybrid") -> dict:
         "mode": mode,
         "answer": NOT_FOUND if not_found else answer,
         "raw_answer": answer,
+        "content": content,
         "not_found": not_found,
         "cited_pages": [] if not_found else retrieved_pages,
         "retrieved_pages": retrieved_pages,
         "retrieved": [{k_: h[k_] for k_ in ("id", "pages", "section", "kind", "rrf",
                                             "vec_rank", "bm25_rank", "distance")} for h in hits],
+        "done_reason": resp.get("done_reason"),
+        "usage": {"prompt_tokens": resp.get("prompt_eval_count"),
+                  "completion_tokens": resp.get("eval_count"),
+                  "total_duration_ns": resp.get("total_duration")},
         "retrieval_s": round(t1 - t0, 3),
         "generation_s": round(t2 - t1, 3),
         "latency_s": round(t2 - t0, 3),

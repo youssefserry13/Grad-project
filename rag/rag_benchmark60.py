@@ -22,8 +22,9 @@ from pathlib import Path
 
 import ollama
 
-from rag_common import (LLM_MODEL, MANIFEST_PATH, RESULTS_DIR, TOP_K,
-                        load_benchmark_questions)
+from rag_common import (COLLECTION, LLM_MODEL, MANIFEST_PATH, MANUAL_PATH, RESULT_SUFFIX,
+                        RESULTS_DIR, TOP_K, load_benchmark_questions)
+from rag_ingest import CHUNKING_VERSION
 from rag_query import ask_rag
 
 S_DIR = Path.home() / "benchmark_v2" / "results" / "raw_outputs"
@@ -117,9 +118,10 @@ def summarize(rows):
 
 def save(rows, summary, stamp):
     RESULTS_DIR.mkdir(exist_ok=True)
-    jpath = RESULTS_DIR / f"rag_benchmark60_{stamp}.json"
-    cpath = RESULTS_DIR / f"rag_benchmark60_{stamp}.csv"
-    config = {"manifest": str(MANIFEST_PATH), "llm": LLM_MODEL, "retrieval": "hybrid",
+    jpath = RESULTS_DIR / f"rag_benchmark60_{stamp}{RESULT_SUFFIX}.json"
+    cpath = RESULTS_DIR / f"rag_benchmark60_{stamp}{RESULT_SUFFIX}.csv"
+    config = {"manifest": str(MANIFEST_PATH), "manual": str(MANUAL_PATH), "collection": COLLECTION,
+              "chunking": CHUNKING_VERSION, "llm": LLM_MODEL, "retrieval": "hybrid",
               "top_k": TOP_K, "prompt": "P03", "judge": f"{LLM_MODEL} temp 0 (rough, not official)",
               "compared": {"S1": str(S_DIR / "local_S1.json"), "S2": str(S_DIR / "local_S2.json"),
                            "C1": f"{CLOUD_PATH} (condition C1)"},

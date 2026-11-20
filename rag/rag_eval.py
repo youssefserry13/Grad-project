@@ -15,7 +15,7 @@ import time
 from datetime import datetime
 
 from rag_common import (COLLECTION, EMBED_MODEL, LLM_MODEL, MANUAL_PATH, MAX_TOKENS,
-                        QUESTIONS_PATH, RESULTS_DIR, TEMPERATURE, TOP_K)
+                        QUESTIONS_PATH, RESULT_SUFFIX, RESULTS_DIR, TEMPERATURE, TOP_K)
 from rag_ingest import CHUNKING_VERSION
 from rag_query import _resources, MODES, ask_rag
 
@@ -91,8 +91,8 @@ def main():
 
     RESULTS_DIR.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    jpath = RESULTS_DIR / f"rag_eval_{stamp}_{args.mode}.json"
-    cpath = RESULTS_DIR / f"rag_eval_{stamp}_{args.mode}.csv"
+    jpath = RESULTS_DIR / f"rag_eval_{stamp}_{args.mode}{RESULT_SUFFIX}.json"
+    cpath = RESULTS_DIR / f"rag_eval_{stamp}_{args.mode}{RESULT_SUFFIX}.csv"
     jpath.write_text(json.dumps({"timestamp": stamp, "config": config, "summary": summary,
                                  "results": rows}, indent=2, ensure_ascii=False), encoding="utf-8")
     with open(cpath, "w", encoding="utf-8", newline="") as f:

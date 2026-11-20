@@ -1,5 +1,6 @@
 """Shared config + helpers for the Nova RAG pipeline (SV-CH / SV-F milling machine manual)."""
 import html
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -9,12 +10,19 @@ CHROMA_DIR = RAG_DIR / "chroma_db"
 RESULTS_DIR = RAG_DIR / "results"
 
 # FINAL 20/11 clean manual (not the 19/11 copy in rag_package, not rag_chunks.jsonl)
-MANUAL_PATH = Path("/mnt/c/Grad/dataset/universal_milling_machine_en.md")
+DEFAULT_MANUAL = Path("/mnt/c/Grad/dataset/universal_milling_machine_en.md")
+DEFAULT_COLLECTION = "milling_manual_v20"
+# Overrides for comparison runs, e.g. the 19/11 manual into its own collection:
+#   RAG_MANUAL=/mnt/c/Grad/dataset/rag_package/manuals/universal_milling_machine_en.md \
+#   RAG_COLLECTION=milling_manual_v19 python rag_ingest.py
+MANUAL_PATH = Path(os.environ.get("RAG_MANUAL", DEFAULT_MANUAL))
 # Read-only: P03 system prompt + user template come from the frozen manifest
 MANIFEST_PATH = Path.home() / "benchmark_v2" / "benchmark_manifest.xlsx"
 QUESTIONS_PATH = Path("/mnt/c/Grad/dataset/rag_package/questions.csv")
 
-COLLECTION = "milling_manual_v20"
+COLLECTION = os.environ.get("RAG_COLLECTION", DEFAULT_COLLECTION)
+# results of non-default collections get a filename suffix so runs never overwrite/mix
+RESULT_SUFFIX = "" if COLLECTION == DEFAULT_COLLECTION else f"_{COLLECTION}"
 EMBED_MODEL = "nomic-embed-text"
 LLM_MODEL = "qwen3:8b"
 TEMPERATURE = 0
