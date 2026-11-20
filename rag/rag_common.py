@@ -31,12 +31,12 @@ def approx_tokens(text: str) -> int:
     return max(1, round(len(text) / 4))
 
 
-def load_prompt(prompt_id: str = "P03") -> dict:
-    """Read a prompt row from the manifest's Frozen_Prompts sheet (stdlib only, read-only)."""
+def read_sheet(sheet_name: str) -> list[dict]:
+    """Read a manifest sheet as a list of {header: value} dicts (stdlib only, read-only)."""
     with zipfile.ZipFile(MANIFEST_PATH) as z:
         wb = z.read("xl/workbook.xml").decode()
         rels = z.read("xl/_rels/workbook.xml.rels").decode()
-        rid = re.search(r'<sheet [^>]*name="Frozen_Prompts"[^>]*r:id="([^"]+)"', wb).group(1)
+        rid = re.search(rf'<sheet [^>]*name="{re.escape(sheet_name)}"[^>]*r:id="([^"]+)"', wb).group(1)
         target = re.search(rf'<Relationship [^>]*Id="{rid}"[^>]*Target="([^"]+)"', rels)
         if target is None:  # attribute order may differ
             target = re.search(rf'<Relationship [^>]*Target="([^"]+)"[^>]*Id="{rid}"', rels)
@@ -47,11 +47,22 @@ def load_prompt(prompt_id: str = "P03") -> dict:
         cells = {}
         for col, body in re.findall(r'<c r="([A-Z]+)\d+"[^>]*>(.*?)</c>', row, re.S):
             text = "".join(re.findall(r"<t[^>]*>(.*?)</t>", body, re.S))
+            if not text:  # numeric / shared-formula cells: <v>7</v>
+                text = "".join(re.findall(r"<v>(.*?)</v>", body, re.S))
             cells[col] = html.unescape(text)
         rows.append(cells)
     header = rows[0]
-    for r in rows[1:]:
-        rec = {header[c]: r.get(c, "") for c in header}
+    return [{header[c]: r.get(c, "") for c in header} for r in rows[1:]]
+
+
+def load_benchmark_questions() -> list[dict]:
+    """The 60 frozen benchmark questions (Manifest sheet)."""
+    return [r for r in read_sheet("Manifest") if r.get("question_id")]
+
+
+def load_prompt(prompt_id: str = "P03") -> dict:
+    """Read a prompt row from the manifest's Frozen_Prompts sheet."""
+    for rec in read_sheet("Frozen_Prompts"):
         if rec.get("prompt_id") == prompt_id:
             assert "{context}" in rec["system_prompt"] or prompt_id != "P03"
             return rec
