@@ -1,2 +1,5 @@
 venv/
 *.m4a
+rag/chroma_db/
+rag/results/
+__pycache__/
