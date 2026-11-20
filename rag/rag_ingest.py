@@ -4,14 +4,16 @@ Usage:
     python rag_ingest.py --stats-only   # chunk + print stats, no embedding
     python rag_ingest.py                # chunk, embed (nomic-embed-text), rebuild collection
 
-Chunking rules (v2):
+Chunking rules (v3):
   * Split on the [Page N - Section] markers. A chunk never mixes sections.
   * Spec page(s) in SUBHEADING_SPLIT_PAGES (p.11) are split into one chunk per <Subheading>
-    group, each prefixed "[Page 11 - 3-1 Machine specifications] <Subheading>".
-  * Markdown tables with more than TABLE_MAX_ROWS data rows are split into groups of
-    TABLE_ROWS_PER_CHUNK rows; every group repeats the section title + header row.
-    (A mostly-empty header row also pulls in the next row; empty first-column group
-    labels are filled down, so each row group keeps its context.) Smaller tables stay whole.
+    group, each prefixed "[Page 11 - 3-1 Machine specifications] <Subheading>", and every
+    spec line is written "Label: value." ("(60Hz) ..." continuation lines get their label back).
+  * Every markdown table row is converted to a self-contained sentence
+    "Header: value. Header: value." (see table_to_rows), with the table caption
+    (preceding <Subheading>, e.g. "<(OPTION)_NT No.40>") kept. Tables with more than
+    TABLE_MAX_ROWS rows are split into groups of TABLE_ROWS_PER_CHUNK rows, each prefixed
+    with page + section (+ caption); smaller tables stay whole inside their text chunk.
   * Remaining text: consecutive pages with the SAME section heading may be merged up to
     ~MAX tokens; oversized pages are split on paragraph/line boundaries with a small overlap.
   * Blank pages and table-of-contents pages are dropped (they only add page-number noise).
@@ -24,7 +26,7 @@ import statistics
 from rag_common import (CHROMA_DIR, COLLECTION, DOC_PREFIX, MANUAL_PATH,
                         approx_tokens, embed)
 
-CHUNKING_VERSION = "v2"
+CHUNKING_VERSION = "v3"
 MIN_TOKENS = 400
 MAX_TOKENS = 600
 OVERLAP_MAX_TOKENS = 80
@@ -91,40 +93,99 @@ def blocks_of(body):
     return out
 
 
-# ---------- structured chunks: table row groups + spec subheadings ----------
+# ---------- tables -> "Header: value." row text ----------
 
 def _cells(row):
     return [c.strip() for c in row.strip().strip("|").split("|")]
 
 
-def split_table(table_text, page, section):
-    """Row-group chunks for a big table, each repeating title + header. None if table is small."""
+def _sentence(pairs, label=""):
+    body = " ".join(f"{k}: {v}" + ("" if v.endswith(".") else ".") for k, v in pairs)
+    return f"{label} — {body}" if label else body
+
+
+def table_to_rows(table_text):
+    """Convert a markdown table into one self-contained sentence per data row.
+
+    * Header names = last non-empty header cell per column (a mostly-empty first header row,
+      e.g. p.70, is merged with the next row).
+    * Columns with no header name are row-label columns (filled down when empty);
+      a numeric label becomes "No. N" (pp.82, 87).
+    * Bare-number headers become "<first header> N" (p.51 "Step 6") or "No. N" (p.15).
+    Returns None if the text is not a markdown table.
+    """
     lines = [l for l in table_text.splitlines() if l.strip()]
     sep = next((i for i, l in enumerate(lines) if re.fullmatch(r"\|?[\s|:-]+\|?", l.strip())), None)
     if sep is None:
         return None
-    header, rows = lines[:sep + 1], lines[sep + 1:]
-    head_cells = _cells(lines[0])
-    if rows and sum(not c for c in head_cells) >= len(head_cells) / 2:
-        header, rows = header + rows[:1], rows[1:]          # e.g. p.70: real column names in row 1
-    if len(rows) <= TABLE_MAX_ROWS:
-        return None
+    header_rows, rows = [_cells(l) for l in lines[:sep]], [_cells(l) for l in lines[sep + 1:]]
+    if rows and sum(not c for c in header_rows[0]) >= len(header_rows[0]) / 2:
+        header_rows, rows = header_rows + rows[:1], rows[1:]
+    ncol = max(len(r) for r in header_rows + rows)
+    names = []
+    for c in range(ncol):
+        vals = [h[c] for h in header_rows if c < len(h) and h[c]]
+        names.append(vals[-1] if vals else "")
 
-    filled, last_label = [], ""
-    for r in rows:                                          # fill down empty first-column labels
-        cells = _cells(r)
-        if cells and not cells[0] and last_label:
-            cells[0] = last_label
-        elif cells and cells[0]:
-            last_label = cells[0]
-        filled.append("| " + " | ".join(cells) + " |")
+    def is_num(s):
+        return re.fullmatch(r"-?\s*\d+", s or "") is not None
 
+    # p.51 style: "Step | 1 | 2 ..." -> first column is the row label, others "Step N"
+    if names[0] and len(names) > 1 and all(is_num(n) for n in names[1:]):
+        prefix, names = names[0], [""] + names[1:]
+    else:
+        prefix = "No."
+    names = [f"{prefix} {re.sub(r'[^0-9]', '', n)}" if is_num(n) else n for n in names]
+    label_cols = [c for c in range(ncol) if not names[c]]
+
+    out, last = [], {}
+    for r in rows:
+        r = r + [""] * (ncol - len(r))
+        labels = []
+        for c in label_cols:
+            v = r[c] or (last.get(c, "") if c == label_cols[0] else "")
+            last[c] = v
+            if v:
+                labels.append(f"No. {v}" if v.isdigit() else v)
+        pairs = [(names[c], r[c]) for c in range(ncol) if c not in label_cols and r[c]]
+        if pairs:
+            out.append(_sentence(pairs, " — ".join(labels)))
+    return out
+
+
+SPEC_SPLIT_RE = re.compile(r"^(.*?[A-Za-z)\]:])\s+([\d~\[+-].*)$")  # value starts at first number
+FREQ_RE = re.compile(r"^\((\d+\s*Hz)\)\s*(.*)$")
+
+
+def spec_lines_to_rows(lines):
+    """p.11 spec lines -> "Label: value." Continuation lines get their label back:
+    "(60Hz) 3000 mm/min" -> "Longitudinal rapid feed (60Hz): 3000 mm/min";
+    "(0.0014, ... inch/rev.)" is appended to the previous value."""
+    rows = []  # [label, value]
+    for line in (l.strip() for l in lines):
+        if not line:
+            continue
+        m = FREQ_RE.match(line)
+        if m and rows:
+            base = re.sub(r"\s*\(\d+\s*Hz\)\s*$", "", rows[-1][0])
+            rows.append([f"{base} ({m.group(1)})", m.group(2)])
+        elif line.startswith("(") and rows:
+            rows[-1][1] += " " + line
+        else:
+            m = SPEC_SPLIT_RE.match(line)
+            rows.append([m.group(1).rstrip(":"), m.group(2)] if m else [line, ""])
+    return [f"{k}: {v}." if v else k for k, v in rows]
+
+
+def table_chunks(rows, page, section, caption):
+    """Big converted table -> chunks of TABLE_ROWS_PER_CHUNK row sentences, title repeated."""
     out = []
-    for i in range(0, len(filled), TABLE_ROWS_PER_CHUNK):
-        grp = filled[i:i + TABLE_ROWS_PER_CHUNK]
-        label = (f"row {i + 1}" if len(grp) == 1 else f"rows {i + 1}-{i + len(grp)}") + f" of {len(filled)}"
-        text = f"[Page {page} - {section}] (table, {label})\n" + "\n".join(header + grp)
-        out.append(_meta_chunk(text, [page], section, "table_rows", has_table=True))
+    for i in range(0, len(rows), TABLE_ROWS_PER_CHUNK):
+        grp = rows[i:i + TABLE_ROWS_PER_CHUNK]
+        label = (f"row {i + 1}" if len(grp) == 1 else f"rows {i + 1}-{i + len(grp)}") + f" of {len(rows)}"
+        cap = f" {caption}" if caption else ""
+        text = f"[Page {page} - {section}]{cap} (table, {label})\n" + "\n".join(grp)
+        out.append(_meta_chunk(text, [page], section, "table_rows", has_table=True, subheading=caption))
     return out
 
 
@@ -137,7 +198,8 @@ def split_subheadings(page):
             groups.append(cur)
         elif cur is not None and line.strip():
             cur["lines"].append(line)
-    return [_meta_chunk(f"[Page {page['page']} - {page['section']}] {g['sub']}\n" + "\n".join(g["lines"]),
+    return [_meta_chunk(f"[Page {page['page']} - {page['section']}] {g['sub']}\n"
+                        + "\n".join(spec_lines_to_rows(g["lines"])),
                         [page["page"]], page["section"], "spec_group", subheading=g["sub"])
             for g in groups if g["lines"]]
 
@@ -151,13 +213,21 @@ def chunk_pages(pages):
         if p["page"] in SUBHEADING_SPLIT_PAGES:
             structured += split_subheadings(p)
             continue
-        blocks = []
+        blocks, caption = [], ""
         for b in blocks_of(p["body"]):
-            rows = split_table(b["text"], p["page"], p["section"]) if b["table"] else None
-            if rows:
-                structured += rows
-            else:
+            if not b["table"]:
+                subs = [l.strip() for l in b["text"].splitlines() if SUBHEADING_RE.match(l)]
+                caption = subs[-1] if subs else caption
                 blocks.append(b)
+                continue
+            rows = table_to_rows(b["text"])
+            if rows is None:                       # not a real table: keep as text
+                blocks.append({**b, "table": False})
+            elif len(rows) > TABLE_MAX_ROWS:
+                structured += table_chunks(rows, p["page"], p["section"], caption)
+            else:                                  # small table: stays whole, as row text
+                cap = caption if caption and not (blocks and caption in blocks[-1]["text"]) else ""
+                blocks.append({"text": (cap + "\n" if cap else "") + "\n".join(rows), "table": True})
         if blocks:
             text_pages.append({**p, "blocks": blocks})
 
