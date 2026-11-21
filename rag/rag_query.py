@@ -59,6 +59,12 @@ def _bm25_ranked(question, n):
 
 
 def retrieve(question: str, k: int = TOP_K, mode: str = "hybrid"):
+    return retrieve_scored(question, k, mode)[0]
+
+
+def retrieve_scored(question: str, k: int = TOP_K, mode: str = "hybrid"):
+    """Like retrieve(), plus relevance signals for routing (e.g. RAG vs general chat):
+    returns (hits, {"top_similarity": best cosine similarity, "top_bm25": best BM25 score})."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     _, _, _, corpus, _ = _resources()
@@ -84,7 +90,9 @@ def retrieve(question: str, k: int = TOP_K, mode: str = "hybrid"):
                      "rrf": round(fused[cid], 5), "vec_rank": vec_rank.get(cid),
                      "bm25_rank": lex_rank.get(cid),
                      "distance": round(dist[cid], 4) if cid in dist else None})
-    return hits
+    scores = {"top_similarity": round(1 - vec[0][1], 4) if vec else None,
+              "top_bm25": round(lex[0][1], 3) if lex else 0.0}
+    return hits, scores
 
 
 def _ordered_pages(hits):
@@ -96,37 +104,48 @@ def _ordered_pages(hits):
     return seen
 
 
-def ask_rag(question: str, k: int = TOP_K, mode: str = "hybrid") -> dict:
-    """Retrieve top-k chunks and answer with prompt P03.
+def ask_rag(question: str, k: int = TOP_K, mode: str = "hybrid", prompt: dict | None = None,
+            hits: list | None = None, max_tokens: int = MAX_TOKENS) -> dict:
+    """Retrieve top-k chunks and answer with prompt P03 (default; the frozen benchmark setting).
 
     Returns {answer, not_found, cited_pages, retrieved, latency_s, retrieval_s, generation_s}.
     cited_pages = pages of the retrieved context in rank order ([] when the answer is NOT FOUND,
     because P03 asks for a bare answer, the model does not cite pages itself).
+
+    Optional (non-benchmark callers, e.g. the voice bridge):
+      prompt     {"system_prompt": ...{context}..., "user_template": ...{question}...,
+                  "not_found": phrase the prompt uses for "no answer"}; P03 when None
+      hits       reuse hits from retrieve()/retrieve_scored() instead of retrieving again
+      max_tokens generation limit (default 1024)
     """
     client, _, _, _, p03 = _resources()
+    prompt = prompt or p03
+    marker = prompt.get("not_found", NOT_FOUND)
     t0 = time.perf_counter()
-    hits = retrieve(question, k, mode)
+    if hits is None:
+        hits = retrieve(question, k, mode)
     t1 = time.perf_counter()
 
     context = "\n\n---\n\n".join(h["text"] for h in hits)
     resp = client.chat(
         model=LLM_MODEL,
-        messages=[{"role": "system", "content": p03["system_prompt"].replace("{context}", context)},
-                  {"role": "user", "content": p03["user_template"].replace("{question}", question)}],
+        messages=[{"role": "system", "content": prompt["system_prompt"].replace("{context}", context)},
+                  {"role": "user", "content": prompt["user_template"].replace("{question}", question)}],
         think=False,
         keep_alive=-1,
-        options={"temperature": TEMPERATURE, "num_predict": MAX_TOKENS},
+        options={"temperature": TEMPERATURE, "num_predict": max_tokens},
     )
     t2 = time.perf_counter()
 
     content = resp["message"]["content"]          # untouched model output
     answer = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
-    not_found = NOT_FOUND in answer.upper()
+    norm = lambda s: s.upper().replace("’", "'")
+    not_found = NOT_FOUND in answer.upper() or norm(marker) in norm(answer)
     retrieved_pages = _ordered_pages(hits)
     return {
         "question": question,
         "mode": mode,
-        "answer": NOT_FOUND if not_found else answer,
+        "answer": marker if not_found else answer,
         "raw_answer": answer,
         "content": content,
         "not_found": not_found,
