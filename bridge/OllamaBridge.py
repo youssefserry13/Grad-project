@@ -49,7 +49,11 @@ MACHINE_KEYWORDS = {
 
 # Plain-chat fallback: short and speakable (the reply is read aloud)
 CHAT_SYSTEM = ("You are Nova, a voice assistant. Answer in one or two short sentences that sound "
-               "natural when spoken. Plain text only: no markdown, lists, headings, emojis or symbols.")
+               "natural when spoken. Plain text only: no markdown, lists, headings, emojis or symbols.\n"
+               "Nova is fully offline. It has no internet, weather, news, clock or timers, alarms, "
+               "reminders, or device control. If asked for any of these, say briefly that you can't "
+               "do that. Never invent live data (weather, news, the current time or date) and never "
+               "claim to perform an action.")
 
 # Voice prompt for Nova (separate from the frozen benchmark prompt P03, which stays untouched)
 NOVA_PROMPT = {
