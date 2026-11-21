@@ -8,6 +8,7 @@ chunking, settings, manifest + manual hashes, hardware, Ollama version).
 Uses the default collection (20/11 manual); refuses to run on a RAG_COLLECTION override.
 """
 import argparse
+import csv
 import hashlib
 import json
 import platform
@@ -20,9 +21,9 @@ from importlib.metadata import version
 from pathlib import Path
 
 from rag_common import (COLLECTION, DEFAULT_COLLECTION, EMBED_MODEL, LLM_MODEL, MANIFEST_PATH,
-                        MANUAL_PATH, MAX_TOKENS, TEMPERATURE, TOP_K, load_benchmark_questions,
-                        load_prompt)
-from rag_ingest import CHUNKING_VERSION
+                        MANUAL_PATH, MAX_TOKENS, QUESTIONS_PATH, TEMPERATURE, TOP_K,
+                        load_benchmark_questions, load_prompt)
+from rag_ingest import CHUNKING_VERSION, chunk_pages, parse_pages
 from rag_query import CANDIDATES, RRF_K, _resources, ask_rag
 
 CONDITION = "R1"
@@ -65,9 +66,35 @@ def hardware():
             "processor_for_llm": "GPU (Ollama, 100% GPU per `ollama ps`)"}
 
 
+RAG_PACKAGE_MD = Path("/mnt/c/Grad/dataset/rag_package/manuals/universal_milling_machine_en.md")
+
+
+def load_ragpackage_questions():
+    """rag_package questions.csv -> R1-style items; ids RP01..RP30 in CSV row order."""
+    with open(QUESTIONS_PATH, encoding="utf-8-sig", newline="") as f:
+        rows = list(csv.DictReader(f))
+    return [{"question_id": f"RP{i:02d}", "source": "Milling Machine",
+             "page": int(r["page"]) if r["page"].strip().isdigit() else None,
+             "question": r["question"], "category": r["category"],
+             "answerable": r["answerable"].strip().lower()} for i, r in enumerate(rows, 1)]
+
+
+def index_check():
+    """Re-chunk the manual in memory and compare with the stored chunks (no writes)."""
+    corpus = _resources()[3]
+    stored = dict(zip(corpus["ids"], corpus["docs"]))
+    chunks = chunk_pages(parse_pages(MANUAL_PATH.read_text(encoding="utf-8")))
+    same = sum(stored.get(c["id"]) == c["text"] for c in chunks)
+    return {"stored_chunks": len(stored), "rechunked_from_manual": len(chunks),
+            "identical": same, "index_matches_manual": same == len(stored) == len(chunks)}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/mnt/c/Grad/to_send")
+    ap.add_argument("--set", default="benchmark", choices=("benchmark", "ragpackage"),
+                    help="benchmark = 60 manifest questions (rag_R1.json); "
+                         "ragpackage = 30 rag_package questions.csv (rag_R1_ragpackage.json)")
     args = ap.parse_args()
     if COLLECTION != DEFAULT_COLLECTION:
         raise SystemExit(f"R1 export must use the default collection ({DEFAULT_COLLECTION}), "
@@ -75,8 +102,14 @@ def main():
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
-    questions = load_benchmark_questions()
-    assert len(questions) == 60, len(questions)
+    if args.set == "benchmark":
+        questions = load_benchmark_questions()
+        assert len(questions) == 60, len(questions)
+        stem = "rag_R1"
+    else:
+        questions = load_ragpackage_questions()
+        assert len(questions) == 30, len(questions)
+        stem = "rag_R1_ragpackage"
     ask_rag("warm-up")
 
     records, started = {}, datetime.now(timezone.utc)
@@ -85,7 +118,7 @@ def main():
         records[q["question_id"]] = {
             "question_id": q["question_id"],
             "source": q["source"],
-            "page": int(q["page"]),
+            "page": int(q["page"]) if q["page"] not in (None, "") else None,
             "image_id": None,
             "condition": CONDITION,
             "prompt_id": "P03",
@@ -101,7 +134,8 @@ def main():
         }
         print(f"{q['question_id']} {r['latency_s']:.2f}s  {records[q['question_id']]['answer_clean'][:70]}")
 
-    (out / "rag_R1.json").write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+    (out / f"{stem}.json").write_text(json.dumps(records, ensure_ascii=False, indent=2),
+                                       encoding="utf-8")
 
     lat = [x["latency_seconds"] for x in records.values()]
     p03 = load_prompt("P03")
@@ -143,9 +177,27 @@ def main():
             "last_run_utc": datetime.now(timezone.utc).isoformat(),
         }
     }
-    (out / "rag_R1_run_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
-                                              encoding="utf-8")
-    print(f"\nSaved {out / 'rag_R1.json'}\n      {out / 'rag_R1_run_meta.json'}")
+    if args.set == "ragpackage":
+        md_pkg = sha256(RAG_PACKAGE_MD)
+        meta[CONDITION].update({
+            "question_set": "rag_package questions.csv (30: 25 answerable + 5 trick)",
+            "questions_file": str(QUESTIONS_PATH),
+            "questions_sha256": sha256(QUESTIONS_PATH),
+            "question_ids": {qid: {"question": q["question"], "category": q["category"],
+                                   "answerable": q["answerable"]}
+                             for qid, q in zip(records, questions)},
+            "manual_hash_check": {
+                "indexed_manual": str(MANUAL_PATH), "indexed_manual_sha256": sha256(MANUAL_PATH),
+                "rag_package_manual": str(RAG_PACKAGE_MD), "rag_package_manual_sha256": md_pkg,
+                "match": md_pkg == sha256(MANUAL_PATH),
+                "note": "The index is the frozen R1 index built from the final 20/11 .md. The "
+                        "rag_package .md is the earlier 19/11 version, so the hashes differ.",
+                "index_vs_indexed_manual": index_check(),
+            },
+        })
+    (out / f"{stem}_run_meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                                               encoding="utf-8")
+    print(f"\nSaved {out / f'{stem}.json'}\n      {out / f'{stem}_run_meta.json'}")
 
 
 if __name__ == "__main__":
