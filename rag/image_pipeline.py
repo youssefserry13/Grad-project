@@ -6,7 +6,8 @@ Mode B (vision only): retrieve with the question -> qwen2.5vl answers from image
                       + top-5 chunks with a Nova-style prompt.
 
 Only one big model fits in 8 GB VRAM, so models are swapped explicitly (keep_alive=0 unload,
-then load) and the swap time is measured on its own. qwen3 is put back with keep_alive=-1.
+then load) and the swap time is measured on its own. qwen3 is put back with keep_alive=-1;
+qwen2.5vl only ever gets a short keep_alive (KEEP_ALIVE).
 
 Building blocks (describe / answer_from_description / answer_with_vision) do NOT swap, so a
 batch test can load a model once and run many questions. run_mode_a / run_mode_b do the full
@@ -35,6 +36,10 @@ MAX_SIDE = int(os.environ.get("IMAGE_MAX_SIDE", 1024))
 JPEG_QUALITY = 85
 DEFAULT_QUESTION = "What is this and what should I know about it from the manual?"
 UNLOAD_TIMEOUT_S = 30
+# qwen3 stays pinned (voice answers). qwen2.5vl only gets a short lease: the bridge unloads it
+# explicitly after each request, and this timeout frees it anyway if a request dies mid-way.
+# (Not 0: batch tests make many vision calls in a row and would reload it every call.)
+KEEP_ALIVE = {TEXT_MODEL: -1, VISION_MODEL: os.environ.get("IMAGE_VISION_KEEP_ALIVE", "2m")}
 
 
 def _client():
@@ -83,8 +88,9 @@ def loaded_models():
     return {getattr(m, "model", None) or m.get("model") for m in _client().ps().models}
 
 
-def use_only(model, keep_alive=-1):
+def use_only(model, keep_alive=None):
     """Make `model` the only big model in VRAM. Returns seconds spent (0 if nothing to do)."""
+    keep_alive = KEEP_ALIVE[model] if keep_alive is None else keep_alive
     client = _client()
     t0 = time.perf_counter()
     loaded = loaded_models()
@@ -106,7 +112,7 @@ def describe(image_b64, question, max_tokens):
     """Mode A step 1: qwen2.5vl describes the image."""
     t0 = time.perf_counter()
     resp = _client().chat(
-        model=VISION_MODEL, keep_alive=-1,
+        model=VISION_MODEL, keep_alive=KEEP_ALIVE[VISION_MODEL],
         messages=[{"role": "system", "content": DESCRIBE_SYSTEM},
                   {"role": "user", "content": DESCRIBE_USER.format(question=question),
                    "images": [image_b64]}],
@@ -138,7 +144,7 @@ def answer_with_vision(image_b64, question, max_tokens):
     hits = label_pages(hits)
     context = "\n\n---\n\n".join(h["text"] for h in hits)
     resp = _client().chat(
-        model=VISION_MODEL, keep_alive=-1,
+        model=VISION_MODEL, keep_alive=KEEP_ALIVE[VISION_MODEL],
         messages=[{"role": "system", "content": NOVA_VISION_PROMPT.replace("{context}", context)},
                   {"role": "user", "content": question, "images": [image_b64]}],
         options={"temperature": TEMPERATURE, "num_predict": max_tokens})
@@ -171,7 +177,7 @@ def finish(out, mode):
 def run_mode_a(image_b64, question, max_tokens):
     steps = {"to_vision_s": use_only(VISION_MODEL)}
     d = describe(image_b64, question, max_tokens)
-    steps["to_text_s"] = use_only(TEXT_MODEL, keep_alive=-1)   # qwen3 back, pinned
+    steps["to_text_s"] = use_only(TEXT_MODEL)   # qwen3 back, pinned
     a = answer_from_description(question, d["description"], max_tokens)
     return finish({**d, **a, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "A")
 
@@ -180,7 +186,7 @@ def run_mode_b(image_b64, question, max_tokens, restore_text=True):
     steps = {"to_vision_s": use_only(VISION_MODEL)}
     b = answer_with_vision(image_b64, question, max_tokens)
     if restore_text:                                     # keep voice answers fast afterwards
-        steps["to_text_s"] = use_only(TEXT_MODEL, keep_alive=-1)
+        steps["to_text_s"] = use_only(TEXT_MODEL)
     return finish({**b, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "B")
 
 
