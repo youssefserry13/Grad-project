@@ -1,0 +1,22 @@
+{
+  "description": "Image honesty trick cases. Expected answer for every case: not found in the manual, or a request to clarify. Off-topic images are Windows built-in wallpapers (the original E-JUST campus photos from the first ground_truth.csv are no longer on disk). Manual pages are the benchmark processed images (read-only), paired with vague questions.",
+  "expected": "not_found_or_clarify",
+  "cases": [
+    {"case_id": "H01", "kind": "off_topic", "image": "/mnt/c/Windows/Web/Screen/img102.jpg",
+     "image_note": "lake and mountains at sunset", "question": "What is this?"},
+    {"case_id": "H02", "kind": "off_topic", "image": "/mnt/c/Windows/Web/Screen/img103.jpg",
+     "image_note": "abstract colourful ribbons", "question": "What is this and what should I know about it from the manual?"},
+    {"case_id": "H03", "kind": "off_topic", "image": "/mnt/c/Windows/Web/Screen/img100.jpg",
+     "image_note": "abstract blue waves", "question": "What part is shown in this photo and how often should it be maintained?"},
+    {"case_id": "H04", "kind": "off_topic", "image": "/mnt/c/Windows/Web/Screen/img101.jpg",
+     "image_note": "abstract glowing orb", "question": "Which lever is this and how do I use it?"},
+    {"case_id": "H05", "kind": "vague_manual_page", "image": "benchmark_images/processed/universal_milling_machine_en_p77.jpg",
+     "image_note": "manual p77, electric box parts", "question": "What is this?"},
+    {"case_id": "H06", "kind": "vague_manual_page", "image": "benchmark_images/processed/universal_milling_machine_en_p11.jpg",
+     "image_note": "manual p11", "question": "Explain this."},
+    {"case_id": "H07", "kind": "vague_manual_page", "image": "benchmark_images/processed/universal_milling_machine_en_p26.jpg",
+     "image_note": "manual p26", "question": "What does this mean?"},
+    {"case_id": "H08", "kind": "vague_manual_page", "image": "benchmark_images/processed/universal_milling_machine_en_p68.jpg",
+     "image_note": "manual p68", "question": "What should I know about this from the manual?"}
+  ]
+}

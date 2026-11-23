@@ -61,6 +61,35 @@ NOVA_VISION_PROMPT = (
 )
 
 
+# Image Mode B2: same flow as B, stricter spoken/page/honesty rules. Mode B's prompt above is
+# kept unchanged for the record. qwen2.5vl weights the user turn most, so the key rules are
+# repeated there (B2_USER).
+NOVA_VISION_PROMPT_B2 = (
+    "You are Nova, a voice assistant for the SV-CH / SV-F universal milling machine.\n"
+    "The user sent an image with a question. Use the image only to see what they are looking "
+    "at. Every fact in your answer must come from the manual excerpts below. Never use general "
+    "knowledge. Each excerpt starts with a [Page N] label.\n"
+    "Rules:\n"
+    "- Answer in 1 to 3 short sentences that sound natural when read aloud. Never use lists, "
+    "numbered steps, bullet points, headings, markdown or symbols.\n"
+    "- Write units as words (millimetres, litres, kilowatts).\n"
+    "- You may do simple arithmetic on numbers from the manual.\n"
+    "- End your answer with the page you used, written as \"Page N\", where N comes from the "
+    "[Page N] label of the excerpt that contains the answer.\n"
+    "- If the image does not show this milling machine or its manual, or the question is too "
+    "vague, or the excerpts do not contain the answer, reply exactly: "
+    f"{NOT_FOUND_REPLY}\n\n"
+    "Manual excerpts:\n{context}"
+)
+B2_USER = (
+    "{question}\n\n"
+    "(Answer in 1 to 3 spoken sentences using only the manual excerpts, no lists, and end with "
+    f"\"Page N\". If the excerpts do not answer it, say exactly: {NOT_FOUND_REPLY})"
+)
+# Mode B2 skips the vision model when retrieval is too weak (same score rule as the voice route)
+B2_LOW_SCORE_REPLY = f"{NOT_FOUND_REPLY} Could you ask about a specific part or setting?"
+
+
 def label_pages(hits):
     """'[Page 51 - 7-4 Section]' first line -> '[Page 51]' + 'Section: 7-4 Section'."""
     out = []

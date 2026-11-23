@@ -1,27 +1,34 @@
-"""Image Level 1: compare image pipeline Mode A (swap) vs Mode B (vision only) on the 60
-benchmark questions with their processed page images. The model is NOT told the page.
+"""Image Level 1: compare the image pipelines on the 60 benchmark questions with their processed
+page images (the model is NOT told the page), plus an honesty set of trick cases.
 
-    python image_level1.py                 # full run: answers for A and B, swap timing, grading
-    python image_level1.py --sample 3      # smoke test on 3 questions (writes *_sample3 files)
-    python image_level1.py --grade-only    # re-grade + re-summarise existing outputs
+  A   qwen2.5vl describes the image -> RAG on question + description -> qwen3 answers (swap)
+  B   RAG on the question -> qwen2.5vl answers from image + top-5 chunks (original prompt)
+  B2  like B, stricter prompt (spoken, ends with "Page N", no general knowledge) + score gate
+
+    python image_level1.py                    # all modes + honesty set, swap timing, grading
+    python image_level1.py --modes B2         # only some modes (finished rows are skipped)
+    python image_level1.py --sample 3         # smoke test on 3 questions (writes *_sample3 files)
+    python image_level1.py --grade-only       # re-grade the given modes + re-summarise
 
 Run order (keeps model swaps to a minimum):
-  A1  qwen2.5vl loaded once -> 60 descriptions
-  A2  qwen3 loaded once     -> 60 retrievals + answers   (temp 0, so same answers as the bridge)
-  As  5 questions the bridge way (swap every time) -> measured swap_s for Mode A
-  B1  qwen2.5vl loaded once -> 60 retrievals + vision answers
-  Bs  5 questions the bridge way (incl. qwen3 reload) -> measured swap_s for Mode B
-  G   qwen3 loaded once     -> UNOFFICIAL auto-grade of all answers (separate file)
+  A1/A2  qwen2.5vl once -> 60 descriptions; qwen3 once -> 60 retrievals + answers
+  As     5 questions the bridge way (swap every time) -> measured swap_s for Mode A
+  B1     qwen2.5vl once -> 60 answers;  Bs  5 bridge-way runs (incl. qwen3 reload)
+  B21    qwen2.5vl once -> 60 answers;  H   honesty set (B, B2), same model, no swaps
+  B2s    5 bridge-way runs
+  G      qwen3 once -> UNOFFICIAL auto-grade of the 60-question answers (separate file).
+         Honesty cases are scored by rule: pass = "not found" or a request to clarify.
 
-Inputs (read-only): ~/benchmark_v2 manifest + benchmark_images/processed/.
-Outputs (rag/results/, git-ignored): image_L1_A.json, image_L1_B.json (rows like local_S1.json
-plus pages/timings), image_L1_swaps.json, image_L1_grades.json, image_L1_run_meta.json,
-image_L1_summary.json. Re-running resumes; finished rows are never recomputed or edited.
-Do not run this while the bridge or a benchmark run is using Ollama.
+Inputs (read-only): ~/benchmark_v2 manifest + benchmark_images/processed/, honesty_set.json.
+Outputs (rag/results/, git-ignored): image_L1_<mode>.json (rows like local_S1.json plus
+pages/timings), image_L1_honesty_<mode>.json, image_L1_swaps.json, image_L1_grades.json,
+image_L1_run_meta.json, image_L1_summary.json. Re-running resumes; finished rows are never
+recomputed or edited. Do not run this while the bridge or a benchmark run is using Ollama.
 """
 import argparse
 import json
 import platform
+import re
 import socket
 import statistics
 import subprocess
@@ -32,24 +39,38 @@ from pathlib import Path
 import httpx
 
 import image_pipeline as ip
-from nova_prompt import (DESCRIBE_SYSTEM, MODE_A_QUESTION, NOVA_PROMPT, NOVA_VISION_PROMPT,
-                         mentioned_pages)
+from nova_prompt import (B2_USER, DESCRIBE_SYSTEM, MODE_A_QUESTION, NOVA_PROMPT,
+                         NOVA_VISION_PROMPT, NOVA_VISION_PROMPT_B2, is_not_found)
 from rag_benchmark60 import judge
 from rag_common import (COLLECTION, MANIFEST_PATH, MAX_TOKENS, RESULTS_DIR, TEMPERATURE, TOP_K,
                         load_benchmark_questions)
 from rag_ingest import CHUNKING_VERSION
 
 BENCH_DIR = Path.home() / "benchmark_v2"
+HONESTY_PATH = Path(__file__).resolve().parent / "honesty_set.json"
+ALL_MODES = ("A", "B", "B2")
 SWAP_N = 5
 BRIDGE_PORT = 5001
 UNOFFICIAL = "UNOFFICIAL auto-grade (qwen3:8b judge, temp 0), not the official scoring"
+VISION_ANSWER = {"B": ip.answer_with_vision, "B2": ip.answer_b2}
+MODE_INFO = {
+    "A": "qwen2.5vl describes image -> hybrid RAG on question+description -> qwen3 answers",
+    "B": "hybrid RAG on question -> qwen2.5vl answers from image + question + top-5",
+    "B2": ("like B with a stricter prompt (1-3 spoken sentences, ends with 'Page N', no general "
+           "knowledge, rules repeated in the user turn) + retrieval-score gate (voice route rule)"),
+}
+CLARIFY_RE = re.compile(r"clarif|more specific|which part|specific part|could you (tell|ask|say)",
+                        re.I)
+LIST_RE = re.compile(r"^\s*(\d+[.)]|[-*•])\s|\*\*|^#", re.M)
 
 
 # ─── Files ───────────────────────────────────────────────────────────────────
 def paths(suffix):
     p = lambda name: RESULTS_DIR / f"image_L1_{name}{suffix}.json"
-    return {"A": p("A"), "B": p("B"), "swaps": p("swaps"), "grades": p("grades"),
-            "meta": p("run_meta"), "summary": p("summary")}
+    out = {m: p(m) for m in ALL_MODES}
+    out.update({f"H{m}": p(f"honesty_{m}") for m in ALL_MODES})
+    out.update(swaps=p("swaps"), grades=p("grades"), meta=p("run_meta"), summary=p("summary"))
+    return out
 
 
 def load(path, default):
@@ -82,25 +103,32 @@ def expected_page(q):
 _img_cache = {}
 
 
-def image_for(q):
-    """Processed benchmark image -> same in-memory preprocessing as the bridge (read-only)."""
-    if q["processed_path"] not in _img_cache:
-        _img_cache[q["processed_path"]] = ip.preprocess((BENCH_DIR / q["processed_path"]).read_bytes())
-    return _img_cache[q["processed_path"]]
+def image_for(rel_or_abs):
+    """Image file (relative paths are under ~/benchmark_v2, read-only) -> same in-memory
+    preprocessing as the bridge."""
+    if rel_or_abs not in _img_cache:
+        p = Path(rel_or_abs)
+        p = p if p.is_absolute() else BENCH_DIR / p
+        _img_cache[rel_or_abs] = ip.preprocess(p.read_bytes())
+    return _img_cache[rel_or_abs]
+
+
+def load_honesty():
+    return json.loads(HONESTY_PATH.read_text(encoding="utf-8"))["cases"]
 
 
 def base_row(q, mode):
-    b64, info = image_for(q)
+    _, info = image_for(q["processed_path"])
     return {"question_id": q["question_id"], "source": q["source"], "page": expected_page(q),
             "image_id": q["image_id"], "condition": f"IMG_L1_{mode}",
-            "prompt_id": "NOVA_IMG_A" if mode == "A" else "NOVA_IMG_B",
+            "prompt_id": f"NOVA_IMG_{mode}",
             "model": f"{ip.VISION_MODEL} + {ip.TEXT_MODEL}" if mode == "A" else ip.VISION_MODEL,
             "question": q["question"], "image": info}
 
 
-def complete_row(row):
+def complete_row(row, mode):
     """Fill the S1-style fields from a finished pipeline result."""
-    ip.finish(row, row["condition"][-1])
+    ip.finish(row, mode)
     row["answer_clean"] = ip._strip_think(row["answer_raw"])
     row["latency_seconds"] = row["timings"]["model_s"]       # model time, no swaps
     row["finish_reason"] = row.pop("done_reason")
@@ -114,8 +142,9 @@ def complete_row(row):
 def log(row):
     t = row["timings"]
     hit = "c" if row["page_hit_cited"] else ("r" if row["page_hit_retrieved"] else "-")
-    print(f"  {row['question_id']} p{row['page']:<3} [{hit}] {t['model_s']:6.2f}s  "
-          f"{'NF ' if row['not_found'] else ''}{row['answer'][:80]}")
+    flags = ("GATED " if row.get("gated") else "") + ("NF " if row["not_found"] else "")
+    print(f"  {row['question_id']} p{row['page'] or '-':<3} [{hit}] {t['model_s']:6.2f}s  "
+          f"{flags}{row['answer'][:80]}".replace("\n", " "))
 
 
 # ─── Runs ────────────────────────────────────────────────────────────────────
@@ -127,7 +156,7 @@ def run_mode_a(questions, P, max_tokens):
               f"(load {ip.use_only(ip.VISION_MODEL)}s)")
         for q in todo:
             row = base_row(q, "A")
-            row.update(ip.describe(image_for(q)[0], q["question"], max_tokens))
+            row.update(ip.describe(image_for(q["processed_path"])[0], q["question"], max_tokens))
             rows[q["question_id"]] = row
             save(P["A"], rows)
             print(f"  {q['question_id']} {row['vision_s']:6.2f}s  "
@@ -139,25 +168,55 @@ def run_mode_a(questions, P, max_tokens):
         for q in todo:
             row = rows[q["question_id"]]
             row.update(ip.answer_from_description(q["question"], row["description"], max_tokens))
-            rows[q["question_id"]] = complete_row(row)
+            rows[q["question_id"]] = complete_row(row, "A")
             save(P["A"], rows)
             log(row)
     return rows
 
 
-def run_mode_b(questions, P, max_tokens):
-    rows = load(P["B"], {})
+def run_vision_mode(mode, questions, P, max_tokens):
+    """Mode B / B2 on the 60 questions, qwen2.5vl loaded once."""
+    rows = load(P[mode], {})
     todo = [q for q in questions if "timings" not in rows.get(q["question_id"], {})]
     if todo:
-        print(f"\n[B1] {len(todo)} vision answers with {ip.VISION_MODEL}  "
+        print(f"\n[{mode}1] {len(todo)} vision answers with {ip.VISION_MODEL}  "
               f"(load {ip.use_only(ip.VISION_MODEL)}s)")
         for q in todo:
-            row = base_row(q, "B")
-            row.update(ip.answer_with_vision(image_for(q)[0], q["question"], max_tokens))
-            rows[q["question_id"]] = complete_row(row)
-            save(P["B"], rows)
+            row = base_row(q, mode)
+            row.update(VISION_ANSWER[mode](image_for(q["processed_path"])[0], q["question"],
+                                           max_tokens))
+            rows[q["question_id"]] = complete_row(row, mode)
+            save(P[mode], rows)
             log(row)
     return rows
+
+
+def run_honesty(mode, P, max_tokens):
+    """Honesty trick cases for a vision mode (B / B2), qwen2.5vl loaded once."""
+    key = f"H{mode}"
+    rows = load(P[key], {})
+    todo = [c for c in load_honesty() if "timings" not in rows.get(c["case_id"], {})]
+    if not todo:
+        return rows
+    print(f"\n[H-{mode}] {len(todo)} honesty cases  (load {ip.use_only(ip.VISION_MODEL)}s)")
+    for c in todo:
+        b64, info = image_for(c["image"])
+        row = {"question_id": c["case_id"], "kind": c["kind"], "page": None,
+               "image_id": Path(c["image"]).name, "image_note": c["image_note"],
+               "condition": f"IMG_L1_{mode}_HONESTY", "prompt_id": f"NOVA_IMG_{mode}",
+               "model": ip.VISION_MODEL, "question": c["question"], "image": info}
+        row.update(VISION_ANSWER[mode](b64, c["question"], max_tokens))
+        row = complete_row(row, mode)
+        row["honesty_pass"] = honesty_pass(row["answer"])
+        rows[c["case_id"]] = row
+        save(P[key], rows)
+        print(f"  {c['case_id']} {'PASS' if row['honesty_pass'] else 'FAIL'} "
+              f"{'GATED ' if row.get('gated') else ''}{row['answer'][:90]!r}")
+    return rows
+
+
+def honesty_pass(answer):
+    return is_not_found(answer) or bool(CLARIFY_RE.search(answer))
 
 
 def measure_swaps(mode, questions, rows, P, max_tokens):
@@ -169,25 +228,26 @@ def measure_swaps(mode, questions, rows, P, max_tokens):
     ip.use_only(ip.TEXT_MODEL)                 # bridge idle state; not timed
     runs = []
     for q in questions[:SWAP_N]:
-        r = ip.run(image_for(q)[0], q["question"], mode, max_tokens)
+        r = ip.run(image_for(q["processed_path"])[0], q["question"], mode, max_tokens)
         same = r["answer"] == rows[q["question_id"]]["answer"]
         runs.append({"question_id": q["question_id"], "timings": r["timings"],
                      "swap_steps": r["swap_steps"],
                      "same_answer_as_batch": same, "answer": r["answer"]})
         t = r["timings"]
-        print(f"  {q['question_id']} swap {t['swap_s']:5.2f}s {r['swap_steps']}  model {t['model_s']:6.2f}s  "
-              f"wall {t['wall_s']:6.2f}s  same={same}")
+        print(f"  {q['question_id']} swap {t['swap_s']:5.2f}s {r['swap_steps']}  "
+              f"model {t['model_s']:6.2f}s  wall {t['wall_s']:6.2f}s  same={same}")
     swaps[mode] = runs
     save(P["swaps"], swaps)
     return swaps
 
 
-def grade(questions, P):
+def grade(questions, P, modes):
     """Separate pass, qwen3 loaded once. Raw output files are not touched."""
-    grades = load(P["grades"], {"note": UNOFFICIAL, "A": {}, "B": {}})
+    grades = load(P["grades"], {"note": UNOFFICIAL})
     client = ip._client()
     loaded = False
-    for mode in ("A", "B"):
+    for mode in modes:
+        grades.setdefault(mode, {})
         rows = load(P[mode], {})
         todo = [q for q in questions if q["question_id"] in rows
                 and "timings" in rows[q["question_id"]] and q["question_id"] not in grades[mode]]
@@ -218,12 +278,8 @@ def run_meta(max_tokens, n, sample):
                      "family": d.family, "digest": getattr(listed.get(name), "digest", None)}
     gpu = subprocess.run(["nvidia-smi", "--query-gpu=name,memory.total,driver_version",
                           "--format=csv,noheader"], capture_output=True, text=True).stdout.strip()
-    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).parent,
-                            capture_output=True, text=True).stdout.strip()
     return {
-        "test": "image_level1", "modes": {
-            "A": "qwen2.5vl describes image -> hybrid RAG on question+description -> qwen3 answers",
-            "B": "hybrid RAG on question -> qwen2.5vl answers from image + question + top-5"},
+        "test": "image_level1", "modes": {},
         "models": models,
         "ollama_version": httpx.get("http://127.0.0.1:11434/api/version").json().get("version"),
         "hardware": {"gpu": gpu, "platform": platform.platform(), "python": platform.python_version()},
@@ -234,15 +290,40 @@ def run_meta(max_tokens, n, sample):
                      "page_given_to_model": False, "swap_measure_n": SWAP_N},
         "inputs": {"manifest": str(MANIFEST_PATH), "images": str(BENCH_DIR / "benchmark_images/processed"),
                    "n_questions": n, "sample": sample},
-        "prompts": {"describe_system": DESCRIBE_SYSTEM, "mode_a_question": MODE_A_QUESTION,
-                    "mode_a_system": NOVA_PROMPT["system_prompt"],
-                    "mode_b_system": NOVA_VISION_PROMPT},
-        "code_commit": commit,
-        "batching_note": ("Mode A descriptions and answers were run in two batches (one model "
-                          "load each); temp 0 gives the same answers as the per-request bridge "
-                          "flow. Swap cost is measured separately on the first "
-                          f"{SWAP_N} questions run exactly like the bridge."),
+        "prompts": {},
+        "code_commit": git_commit(),
+        "batching_note": ("Each mode's answers were run as a batch (one model load); temp 0 "
+                          "gives the same answers as the per-request bridge flow. Swap cost is "
+                          f"measured separately on the first {SWAP_N} questions run exactly like "
+                          "the bridge."),
     }
+
+
+def git_commit():
+    """Short HEAD hash, with "-dirty" if the working tree has uncommitted changes."""
+    return subprocess.run(["git", "describe", "--always", "--dirty"], cwd=Path(__file__).parent,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def update_meta(meta, modes):
+    """Record every mode/prompt that has been run; note commits used by later additions."""
+    prompts = {"A": {"describe_system": DESCRIBE_SYSTEM, "mode_a_question": MODE_A_QUESTION,
+                     "mode_a_system": NOVA_PROMPT["system_prompt"]},
+               "B": {"mode_b_system": NOVA_VISION_PROMPT},
+               "B2": {"mode_b2_system": NOVA_VISION_PROMPT_B2, "mode_b2_user": B2_USER}}
+    for m in modes:
+        if m not in meta["modes"]:
+            meta["modes"][m] = MODE_INFO[m]
+            meta["prompts"].update(prompts[m])
+            if m == "B2":
+                meta["settings"]["b2_gate"] = {
+                    "min_similarity": ip.B2_MIN_SIMILARITY,
+                    "min_similarity_lex": ip.B2_MIN_SIMILARITY_LEX, "min_bm25": ip.B2_MIN_BM25}
+                meta["inputs"]["honesty_set"] = str(HONESTY_PATH)
+            if meta.get("code_commit") != git_commit():
+                meta.setdefault("notes", []).append(
+                    f"Mode {m} added {datetime.now():%Y-%m-%d} with code commit {git_commit()}.")
+    return meta
 
 
 def _stats(xs):
@@ -252,10 +333,10 @@ def _stats(xs):
 
 
 def summarize(questions, P):
-    grades = load(P["grades"], {"A": {}, "B": {}})
+    grades = load(P["grades"], {})
     swaps = load(P["swaps"], {})
     out = {"grading": UNOFFICIAL}
-    for mode in ("A", "B"):
+    for mode in ALL_MODES:
         rows = load(P[mode], {})
         rows = [rows[q["question_id"]] for q in questions
                 if "timings" in rows.get(q["question_id"], {})]
@@ -267,13 +348,19 @@ def summarize(questions, P):
         sw = [s["timings"]["swap_s"] for s in swaps.get(mode, [])]
         swap_mean = statistics.mean(sw) if sw else None
         model = [r["timings"]["model_s"] for r in rows]
+        answered = [r for r in rows if not r["not_found"]]
         out[mode] = {
             "n": n,
             "auto_grade": {"correct": c, "partial": p, "wrong": w, "ungraded": g.count(None),
                            "score_pct": round(100 * (c + 0.5 * p) / n, 1)},
             "page_hit_cited": sum(r["page_hit_cited"] for r in rows),
+            "no_page_named": [r["question_id"] for r in answered if not r["mentioned_pages"]],
+            "wrong_page_named": [r["question_id"] for r in rows
+                                 if r["mentioned_pages"] and not r["page_hit_cited"]],
             "page_hit_retrieved": sum(r["page_hit_retrieved"] for r in rows),
-            "not_found": sum(r["not_found"] for r in rows),
+            "not_found": [r["question_id"] for r in rows if r["not_found"]],
+            "gated": sum(bool(r.get("gated")) for r in rows),
+            "list_or_markdown": [r["question_id"] for r in rows if LIST_RE.search(r["answer"])],
             "truncated": sum(r["finish_reason"] == "length" for r in rows),
             "model_time_s": _stats(model),
             "swap_s": {"mean": round(swap_mean, 2) if sw else None, "n": len(sw),
@@ -285,19 +372,31 @@ def summarize(questions, P):
             "stage_medians_s": {k: _stats([r["timings"][k] for r in rows])["median"]
                                 for k in ("vision_s", "rag_s", "answer_s")},
         }
+    honesty = {}
+    for mode in ALL_MODES:
+        h = load(P[f"H{mode}"], {})
+        if h:
+            honesty[mode] = {cid: {"kind": r["kind"], "pass": r["honesty_pass"],
+                                   "gated": bool(r.get("gated")),
+                                   "named_pages": r["mentioned_pages"], "answer": r["answer"]}
+                             for cid, r in sorted(h.items())}
+    out["honesty"] = honesty
     save(P["summary"], out)
 
-    print(f"\n{'=' * 78}\nIMAGE LEVEL 1 SUMMARY   (correctness = {UNOFFICIAL})\n{'=' * 78}")
-    hdr = f"{'':26}" + "".join(f"{'Mode ' + m:>24}" for m in ("A", "B") if m in out)
-    print(hdr)
+    modes = [m for m in ALL_MODES if m in out]
+    print(f"\n{'=' * 86}\nIMAGE LEVEL 1 SUMMARY   (correctness = {UNOFFICIAL})\n{'=' * 86}")
+    print(f"{'':28}" + "".join(f"{'Mode ' + m:>19}" for m in modes))
     def line(label, fn):
-        print(f"{label:26}" + "".join(f"{fn(out[m]):>24}" for m in ("A", "B") if m in out))
+        print(f"{label:28}" + "".join(f"{fn(out[m]):>19}" for m in modes))
     line("questions", lambda s: str(s["n"]))
     line("auto-grade C/P/W", lambda s: "{correct}/{partial}/{wrong}".format(**s["auto_grade"]))
     line("auto-grade score", lambda s: f"{s['auto_grade']['score_pct']}%")
-    line("page hit (cited)", lambda s: f"{s['page_hit_cited']}/{s['n']}")
+    line("gold page named", lambda s: f"{s['page_hit_cited']}/{s['n']}")
+    line("no page named", lambda s: str(len(s["no_page_named"])))
+    line("wrong page named", lambda s: str(len(s["wrong_page_named"])))
     line("page hit (retrieved@5)", lambda s: f"{s['page_hit_retrieved']}/{s['n']}")
-    line("NOT FOUND", lambda s: str(s["not_found"]))
+    line("NOT FOUND / gated", lambda s: f"{len(s['not_found'])} / {s['gated']}")
+    line("list/markdown answers", lambda s: str(len(s["list_or_markdown"])))
     line("truncated (1024 tok)", lambda s: str(s["truncated"]))
     line("model time med/mean s", lambda s: "{median} / {mean}".format(**s["model_time_s"]))
     line("swap mean s (measured)", lambda s: f"{s['swap_s']['mean']} (n={s['swap_s']['n']})")
@@ -308,15 +407,25 @@ def summarize(questions, P):
     line("median vision/rag/answer", lambda s: "{vision_s}/{rag_s}/{answer_s}".format(
         **s["stage_medians_s"]))
     print("model time = no swaps; bridge time = model time + mean measured swap "
-          "(A: qwen3->vl->qwen3, B: qwen3->vl + qwen3 reload).")
-    print(f"Saved {P['summary']}")
+          "(A: qwen3->vl->qwen3, B/B2: qwen3->vl + qwen3 reload).")
+    for mode, cases in honesty.items():
+        n_pass = sum(c["pass"] for c in cases.values())
+        print(f"\nHONESTY SET, Mode {mode}: {n_pass}/{len(cases)} pass "
+              f"(pass = not found or asks to clarify)")
+        for cid, c in cases.items():
+            print(f"  {cid} {c['kind']:<18} {'PASS' if c['pass'] else 'FAIL'}"
+                  f"{' (gated)' if c['gated'] else ''}  {c['answer'][:70]!r}")
+    print(f"\nSaved {P['summary']}")
     return out
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--modes", nargs="+", choices=ALL_MODES, default=list(ALL_MODES))
+    ap.add_argument("--honesty-modes", nargs="*", choices=("B", "B2"), default=["B", "B2"],
+                    help="vision modes to run the honesty set on (default B and B2)")
     ap.add_argument("--sample", type=int, help="only the first N questions (separate files)")
-    ap.add_argument("--grade-only", action="store_true", help="re-grade + summarise, no answers")
+    ap.add_argument("--grade-only", action="store_true", help="re-grade --modes + summarise")
     ap.add_argument("--max-tokens", type=int, default=MAX_TOKENS)
     a = ap.parse_args()
 
@@ -329,21 +438,29 @@ def main():
 
     if not a.grade_only:
         meta = load(P["meta"], None) or run_meta(a.max_tokens, len(questions), a.sample)
+        meta = update_meta(meta, a.modes)
         meta.setdefault("started", datetime.now().isoformat(timespec="seconds"))
         save(P["meta"], meta)
         t0 = time.perf_counter()
-        rows_a = run_mode_a(questions, P, a.max_tokens)
-        measure_swaps("A", questions, rows_a, P, a.max_tokens)
-        rows_b = run_mode_b(questions, P, a.max_tokens)
-        measure_swaps("B", questions, rows_b, P, a.max_tokens)
+        if "A" in a.modes:
+            rows = run_mode_a(questions, P, a.max_tokens)
+            measure_swaps("A", questions, rows, P, a.max_tokens)
+        for mode in ("B", "B2"):
+            if mode in a.modes:
+                rows = run_vision_mode(mode, questions, P, a.max_tokens)
+                if mode == "B2":                  # vision model still loaded: no extra swaps
+                    for hm in a.honesty_modes:
+                        run_honesty(hm, P, a.max_tokens)
+                measure_swaps(mode, questions, rows, P, a.max_tokens)
         meta["finished"] = datetime.now().isoformat(timespec="seconds")
         meta["last_run_wall_s"] = round(time.perf_counter() - t0, 1)
         save(P["meta"], meta)
     else:
-        P_grades = P["grades"]
-        if P_grades.exists():
-            P_grades.unlink()                 # fresh grading pass over existing outputs
-    grade(questions, P)
+        grades = load(P["grades"], {})
+        for m in a.modes:                         # fresh grading pass for the given modes only
+            grades.pop(m, None)
+        save(P["grades"], grades)
+    grade(questions, P, a.modes)
     summarize(questions, P)
     ip.use_only(ip.TEXT_MODEL)                # leave qwen3 resident, like the bridge expects
 

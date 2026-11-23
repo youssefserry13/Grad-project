@@ -31,9 +31,10 @@ WAKE_THRESHOLD = 0.85
 client = ollama.Client(host=OLLAMA_HOST)
 
 # Image questions: "A" = qwen2.5vl describes -> RAG -> qwen3 answers (model swap),
+#                  "B2" = like B with the stricter spoken/page/honesty prompt + score gate,
 #                  "B" = RAG -> qwen2.5vl answers from image + chunks. Per request: form "mode".
 IMAGE_MODE = os.environ.get("IMAGE_MODE", "A").upper()
-assert IMAGE_MODE in image_pipeline.MODES, f"IMAGE_MODE must be A or B, got {IMAGE_MODE!r}"
+assert IMAGE_MODE in image_pipeline.MODES, f"IMAGE_MODE must be one of {image_pipeline.MODES}"
 # Only one big model fits in 8 GB VRAM: image swaps and text answers must not overlap.
 GPU_LOCK = threading.Lock()
 
@@ -261,7 +262,7 @@ def handle_image():
     question = (question or "").strip() or image_pipeline.DEFAULT_QUESTION
     mode = (mode or IMAGE_MODE).strip().upper()
     if mode not in image_pipeline.MODES:
-        return jsonify({"status": "error", "error": f"mode must be A or B, got {mode!r}"}), 400
+        return jsonify({"status": "error", "error": f"mode must be one of {image_pipeline.MODES}, got {mode!r}"}), 400
     try:
         image_b64, img_info = image_pipeline.preprocess(image_bytes)
     except image_pipeline.BadImage as e:

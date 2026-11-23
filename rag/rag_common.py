@@ -77,6 +77,12 @@ def load_prompt(prompt_id: str = "P03") -> dict:
     raise KeyError(f"{prompt_id} not found in {MANIFEST_PATH}")
 
 
+# Optional: RAG_EMBED_NUM_GPU=0 runs nomic-embed-text on the CPU, leaving all VRAM for the big
+# model (Ollama reloads a model when num_gpu changes, so every embed call must pass the same value).
+EMBED_NUM_GPU = os.environ.get("RAG_EMBED_NUM_GPU")
+
+
 def embed(client, texts, prefix):
-    resp = client.embed(model=EMBED_MODEL, input=[prefix + t for t in texts])
+    opts = {"num_gpu": int(EMBED_NUM_GPU)} if EMBED_NUM_GPU not in (None, "") else None
+    resp = client.embed(model=EMBED_MODEL, input=[prefix + t for t in texts], options=opts)
     return resp["embeddings"]

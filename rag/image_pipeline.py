@@ -22,15 +22,21 @@ import time
 from PIL import Image, ImageOps
 
 import rag_query
-from nova_prompt import (DESCRIBE_SYSTEM, DESCRIBE_USER, MODE_A_QUESTION, NOVA_PROMPT,
-                         NOVA_VISION_PROMPT, NOT_FOUND_REPLY, answer_pages, is_not_found,
-                         label_pages, mentioned_pages)
+from nova_prompt import (B2_LOW_SCORE_REPLY, B2_USER, DESCRIBE_SYSTEM, DESCRIBE_USER,
+                         MODE_A_QUESTION, NOVA_PROMPT, NOVA_VISION_PROMPT, NOVA_VISION_PROMPT_B2,
+                         NOT_FOUND_REPLY, answer_pages, is_not_found, label_pages,
+                         mentioned_pages)
 from rag_common import LLM_MODEL, TEMPERATURE, TOP_K
 
 TEXT_MODEL = LLM_MODEL                 # qwen3:8b
 VISION_MODEL = "qwen2.5vl:7b"
 BIG_MODELS = (TEXT_MODEL, VISION_MODEL)
-MODES = ("A", "B")
+MODES = ("A", "B", "B2")
+# Mode B2 gate: same retrieval-score rule as the voice route (bridge RAG_MIN_*). Note: it only
+# stops near-empty questions; generic ones ("Explain this.") still score like real questions.
+B2_MIN_SIMILARITY = 0.62
+B2_MIN_SIMILARITY_LEX = 0.58
+B2_MIN_BM25 = 5.0
 
 MAX_SIDE = int(os.environ.get("IMAGE_MAX_SIDE", 1024))
 JPEG_QUALITY = 85
@@ -136,17 +142,33 @@ def answer_from_description(question, description, max_tokens):
             "rag_s": rag_s, "answer_s": r["generation_s"]}
 
 
-def answer_with_vision(image_b64, question, max_tokens):
-    """Mode B: retrieve with the question only, qwen2.5vl answers from image + chunks."""
+def retrieval_ok(scores):
+    sim, bm25 = scores["top_similarity"] or 0.0, scores["top_bm25"]
+    return sim >= B2_MIN_SIMILARITY or (sim >= B2_MIN_SIMILARITY_LEX and bm25 >= B2_MIN_BM25)
+
+
+def answer_with_vision(image_b64, question, max_tokens, system=NOVA_VISION_PROMPT,
+                       user="{question}", gate=False, retrieved=None):
+    """Mode B (and B2 with the B2 prompts + gate=True): retrieve with the question only,
+    qwen2.5vl answers from image + chunks. gate: skip the model when retrieval is weak.
+    retrieved: (hits, scores, rag_s) from an earlier retrieve_scored() call, to reuse."""
     t0 = time.perf_counter()
-    hits, scores = rag_query.retrieve_scored(question, TOP_K)
+    hits, scores = retrieved[:2] if retrieved else rag_query.retrieve_scored(question, TOP_K)
     t1 = time.perf_counter()
+    if retrieved:
+        t0 = t1 - retrieved[2]
+    if gate and not retrieval_ok(scores):
+        return {"answer_raw": "", "answer": B2_LOW_SCORE_REPLY, "not_found": True,
+                "gated": True, "retrieved_pages": [], "retrieved": [], "scores": scores,
+                "usage": {}, "done_reason": "gated", "rag_s": round(t1 - t0, 3),
+                "vision_s": 0.0}
     hits = label_pages(hits)
     context = "\n\n---\n\n".join(h["text"] for h in hits)
     resp = _client().chat(
         model=VISION_MODEL, keep_alive=KEEP_ALIVE[VISION_MODEL],
-        messages=[{"role": "system", "content": NOVA_VISION_PROMPT.replace("{context}", context)},
-                  {"role": "user", "content": question, "images": [image_b64]}],
+        messages=[{"role": "system", "content": system.replace("{context}", context)},
+                  {"role": "user", "content": user.replace("{question}", question),
+                   "images": [image_b64]}],
         options={"temperature": TEMPERATURE, "num_predict": max_tokens})
     t2 = time.perf_counter()
     content = resp["message"]["content"]
@@ -154,7 +176,7 @@ def answer_with_vision(image_b64, question, max_tokens):
     not_found = is_not_found(answer)
     retrieved_pages = rag_query._ordered_pages(hits)
     return {"answer_raw": content, "answer": NOT_FOUND_REPLY if not_found else answer,
-            "not_found": not_found, "retrieved_pages": retrieved_pages,
+            "not_found": not_found, "gated": False, "retrieved_pages": retrieved_pages,
             "retrieved": [{k: h[k] for k in ("id", "pages", "section", "rrf")} for h in hits],
             "scores": scores, "usage": _usage(resp), "done_reason": resp.get("done_reason"),
             "rag_s": round(t1 - t0, 3), "vision_s": round(t2 - t1, 3)}
@@ -190,10 +212,33 @@ def run_mode_b(image_b64, question, max_tokens, restore_text=True):
     return finish({**b, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "B")
 
 
+def answer_b2(image_b64, question, max_tokens, retrieved=None):
+    return answer_with_vision(image_b64, question, max_tokens, system=NOVA_VISION_PROMPT_B2,
+                              user=B2_USER, gate=True, retrieved=retrieved)
+
+
+def run_mode_b2(image_b64, question, max_tokens, restore_text=True):
+    # Retrieve first: a gated question never touches the vision model (no swap at all).
+    t0 = time.perf_counter()
+    hits, scores = rag_query.retrieve_scored(question, TOP_K)
+    rag_s = round(time.perf_counter() - t0, 3)
+    if not retrieval_ok(scores):
+        return finish({"answer_raw": "", "answer": B2_LOW_SCORE_REPLY, "not_found": True,
+                       "gated": True, "retrieved_pages": [], "retrieved": [], "scores": scores,
+                       "usage": {}, "done_reason": "gated", "rag_s": rag_s,
+                       "swap_s": 0.0, "swap_steps": {}}, "B2")
+    steps = {"to_vision_s": use_only(VISION_MODEL)}
+    b = answer_b2(image_b64, question, max_tokens, retrieved=(hits, scores, rag_s))
+    if restore_text:
+        steps["to_text_s"] = use_only(TEXT_MODEL)
+    return finish({**b, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "B2")
+
+
 def run(image_b64, question, mode, max_tokens):
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")
     t0 = time.perf_counter()
-    out = (run_mode_a if mode == "A" else run_mode_b)(image_b64, question, max_tokens)
+    out = {"A": run_mode_a, "B": run_mode_b, "B2": run_mode_b2}[mode](image_b64, question,
+                                                                     max_tokens)
     out["timings"]["wall_s"] = round(time.perf_counter() - t0, 3)
     return out
