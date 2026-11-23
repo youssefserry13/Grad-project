@@ -4,7 +4,7 @@
 · webcam client `nova_live.py` (Windows) ──localhost:5001──▶ bridge · bridge ──▶ `<WSL gateway>:5002/frame` (camera frame)
 
 ## The night before (home)
-- [ ] Windows: `winget install -e --id Python.Python.3.12`, then a **new** terminal: `py -m pip install opencv-python sounddevice numpy requests pyttsx3`
+- [ ] Windows: `winget install -e --id Python.Python.3.12`, then a **new** terminal: `py -m pip install opencv-python sounddevice numpy requests pywin32`
 - [ ] Run the client once (below). When Windows Firewall asks about Python, click **Allow** (tick both networks). If you cancel it, Windows adds a block rule that wins over the setup script's allow rule for 5002.
 - [ ] Laptop on charger, power mode "Best performance", Windows updates paused, notifications off.
 
@@ -13,7 +13,7 @@
    `MODEL_MODE=single` line must say qwen3-vl, ctx 4096.
 2. **Join the lab Wi-Fi**, then **admin PowerShell**: `powershell -ExecutionPolicy Bypass -File C:\Grad\live\esp_network_setup.ps1` → note the green `ESP firmware: http://<Wi-Fi IP>:5001/audio`.
 3. **ESP32**: set that URL (if the firmware has the IP hard-coded, it must match; see fallback B).
-4. **Windows terminal**: `py C:\Grad\live\nova_live.py` (other camera: `--camera 1`; mic: `--list-mics`, then `--mic N`).
+4. **Windows terminal**: `py C:\Grad\live\nova_live.py` (other camera: `--camera 1`; mic: `--list-mics`, then `--mic N`; only answer to "Nova ...": `--require-wake`).
 
 ## Tune the ESP speech detection in the lab (1 minute, once)
 The ESP streams continuously; the bridge closes an utterance after speech + 0.8 s silence.

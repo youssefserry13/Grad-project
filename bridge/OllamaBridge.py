@@ -40,6 +40,13 @@ WHISPER_MODEL = "large-v3-turbo"
 # Whisper language for /live and ESP streams ("" = auto-detect). Short push-to-talk clips are
 # often mis-detected, and the manual questions are English.
 WHISPER_LANGUAGE = os.environ.get("WHISPER_LANGUAGE", "en") or None
+# Vocabulary hint for /live and ESP (Whisper's initial_prompt): the manual's key terms, so
+# "lubrication" isn't heard as "replication". WHISPER_PROMPT="" turns it off.
+WHISPER_PROMPT = os.environ.get(
+    "WHISPER_PROMPT",
+    "Nova, a voice assistant for a universal milling machine. Lubrication, lubrication tank, "
+    "spindle, coolant, milling, vise, table, feed, gear box, arbor, knee, saddle, quill, oil, "
+    "slideway.") or None
 PORT = 5001
 WAKE_WORD = "nova"
 WAKE_THRESHOLD = 0.85
@@ -248,7 +255,8 @@ def transcribe(audio):
     VAD drops silence so push-to-talk gaps don't turn into hallucinated words."""
     t0 = time.perf_counter()
     with WHISPER_LOCK:
-        segments, info = whisper.transcribe(audio, language=WHISPER_LANGUAGE, vad_filter=True)
+        segments, info = whisper.transcribe(audio, language=WHISPER_LANGUAGE, vad_filter=True,
+                                            initial_prompt=WHISPER_PROMPT)
         text = " ".join(s.text for s in segments).strip()
     return text, info.language, round(time.perf_counter() - t0, 3)
 
@@ -313,7 +321,8 @@ def respond(transcript, origin, image_bytes=None, frame_from_camera=False):
             else:
                 r = image_pipeline.run(image_b64, transcript, IMAGE_MODE, RAG_MAX_TOKENS)
         t = r["timings"]
-        fallback = " + describe-retrieval" if r.get("look_fallback") else ""
+        fallback = (" + describe-retrieval" if r.get("look_fallback") else "") + \
+            (" + general (not in manual)" if r.get("general") else "")
         out.update(route="image", route_reason=f"look question, mode {IMAGE_MODE}{fallback}",
                    answer=strip_markdown(r["answer"]), pages=r["pages"],
                    not_found=r["not_found"], image=img_info,
@@ -562,7 +571,8 @@ def handle_audio():
 
 
 # ─── Live endpoint (push-to-talk from nova_live.py) ─────────────────────────
-# multipart: audio=<wav, 16 kHz mono>, image=<jpg, optional>. No wake word.
+# multipart: audio=<wav, 16 kHz mono>, image=<jpg, optional>, require_wake=1 (optional: only
+# answer if the transcript contains the wake word "Nova", which is then stripped).
 @app.route("/live", methods=["POST"])
 def handle_live():
     t0 = time.perf_counter()
@@ -570,6 +580,7 @@ def handle_live():
     if f is None:
         return jsonify({"status": "error", "error": "multipart field 'audio' (wav) is required"}), 400
     audio_bytes = f.read()
+    Path(__file__).with_name("last_live.wav").write_bytes(audio_bytes)   # for mishearing reports
     image_bytes = request.files["image"].read() if request.files.get("image") else None
     try:
         text, lang, whisper_s = transcribe(io.BytesIO(audio_bytes))
@@ -579,6 +590,12 @@ def handle_live():
     if not text:
         return jsonify({"status": "empty", "transcript": "", "route": None, "answer": "",
                         "pages": [], "timings": {"whisper_s": whisper_s}}), 200
+    if request.form.get("require_wake", "0").lower() in ("1", "true", "yes"):
+        if not wake_word_detected(text.lower()):
+            print("💤 /live: wake word required but not heard, ignoring.")
+            return jsonify({"status": "ignored", "transcript": text, "route": None,
+                            "answer": "", "pages": [], "timings": {"whisper_s": whisper_s}}), 200
+        text = extract_command(text)
     out = respond(text, origin="live", image_bytes=image_bytes)
     out["timings"] = {"whisper_s": whisper_s, **out["timings"],
                       "total_s": round(time.perf_counter() - t0, 3)}

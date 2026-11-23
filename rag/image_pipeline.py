@@ -23,9 +23,10 @@ from PIL import Image, ImageOps
 
 import rag_query
 from nova_prompt import (B2_LOW_SCORE_REPLY, B2_USER, DESCRIBE_SYSTEM, DESCRIBE_USER,
+                         GENERAL_NOT_IN_MANUAL, GENERAL_VISION_PROMPT, MACHINE_RE,
                          MODE_A_QUESTION, NOVA_PROMPT, NOVA_VISION_PROMPT, NOVA_VISION_PROMPT_B2,
                          NOT_FOUND_REPLY, answer_pages, is_not_found, label_pages,
-                         mentioned_pages)
+                         mentioned_pages, strip_page_mentions)
 from rag_common import LLM_MODEL, TEMPERATURE, TOP_K
 
 TEXT_MODEL = LLM_MODEL                 # qwen3:8b
@@ -256,12 +257,54 @@ def run_mode_b2(image_b64, question, max_tokens, restore_text=True):
 LOOK_DESCRIBE_TOKENS = 120   # short description: it only feeds retrieval (speed matters live)
 
 
+GENERAL_TOKENS = 80            # 1-2 spoken sentences
+
+
+def answer_general(image_b64, question, max_tokens=GENERAL_TOKENS):
+    """Camera question the manual can't answer: short answer from the image only."""
+    t0 = time.perf_counter()
+    resp = _client().chat(
+        model=VISION_MODEL, keep_alive=KEEP_ALIVE[VISION_MODEL],
+        messages=[{"role": "system", "content": GENERAL_VISION_PROMPT},
+                  {"role": "user", "content": question, "images": [image_b64]}],
+        options={**OPTIONS, "temperature": TEMPERATURE, "num_predict": max_tokens})
+    raw = _strip_think(resp["message"]["content"])
+    return {"general_raw": raw, "general_answer": strip_page_mentions(raw),
+            "general_usage": _usage(resp), "general_s": round(time.perf_counter() - t0, 3)}
+
+
 def run_mode_b2_look(image_b64, question, max_tokens, restore_text=True):
-    """B2 for spoken camera questions (/live, ESP). Vague questions ("What is this part?") give
-    too weak a retrieval on the question alone, so B2's gate stops them. Then: the vision model
-    describes the image, retrieval is redone on question + description (like Mode A), and B2
-    answers from the image + those excerpts. The gate still applies to the new retrieval, so
-    off-topic images stay "not found". No extra swap in single-model mode."""
+    """Spoken camera questions (/live, ESP): the manual first (B2, with describe-retrieval for
+    vague questions), and if the manual has no answer, a general answer from the image only
+    (like the voice route's chat fallback): 1-2 sentences, no manual facts, no page numbers,
+    plus "I couldn't find that in the manual." when the question or image is about the machine."""
+    res = _b2_look_manual(image_b64, question, max_tokens, restore_text=False)
+    if res["not_found"]:
+        use_only(VISION_MODEL)
+        g = answer_general(image_b64, question)
+        about_machine = bool(MACHINE_RE.search(question) or MACHINE_RE.search(g["general_answer"])
+                             or MACHINE_RE.search(res.get("description", "")))
+        answer = g["general_answer"] or "I'm not sure what I'm looking at."
+        if about_machine:
+            answer = f"{answer} {GENERAL_NOT_IN_MANUAL}"
+        res.update(g, manual_answer=res["answer"], answer=answer, general=True,
+                   about_machine=about_machine, pages=[], mentioned_pages=[])
+        res["timings"]["vision_s"] = round(res["timings"]["vision_s"] + g["general_s"], 3)
+        res["timings"]["model_s"] = round(res["timings"]["model_s"] + g["general_s"], 3)
+        res["timings"]["total_s"] = round(res["timings"]["total_s"] + g["general_s"], 3)
+    else:
+        res["general"] = False
+    if restore_text:
+        res["timings"]["swap_s"] += use_only(TEXT_MODEL)
+    return res
+
+
+def _b2_look_manual(image_b64, question, max_tokens, restore_text=True):
+    """B2 for spoken camera questions. Vague questions ("What is this part?") give too weak a
+    retrieval on the question alone, so B2's gate stops them. Then: the vision model describes
+    the image, retrieval is redone on question + description (like Mode A), and B2 answers from
+    the image + those excerpts. The gate still applies to the new retrieval, so off-topic images
+    stay "not found". No extra swap in single-model mode."""
     out = run_mode_b2(image_b64, question, max_tokens, restore_text=restore_text)
     if not out.get("gated"):
         out["look_fallback"] = False

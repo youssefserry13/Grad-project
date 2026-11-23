@@ -6,14 +6,15 @@
 
 Hold SPACE (with this window focused) to talk, release to send the recording + the current
 camera frame to the bridge's /live endpoint. The transcript and answer are drawn on the video
-and the answer is spoken with the offline Windows voice (pyttsx3). Q or Esc quits.
+and every answer is spoken, in order, with the offline Windows voice (SAPI). Q or Esc quits.
+--require-wake: only answer when you say "Nova ..." (default: push-to-talk needs no wake word).
 
 Also, for the ESP32 microphone:
   - serves the latest camera frame on http://<this laptop>:5002/frame, so the bridge can answer
     "look" questions asked through the ESP;
   - polls the bridge's /last_answer and shows + speaks answers to ESP questions as well.
 
-pip install opencv-python sounddevice numpy requests pyttsx3
+pip install opencv-python sounddevice numpy requests pywin32
 """
 import argparse
 import ctypes
@@ -53,25 +54,30 @@ class State:
 S = State()
 
 
-# ─── Speech output (own thread; SAPI needs COM initialised in that thread) ──
+# ─── Speech output: SAPI directly, in its own thread, every answer in order ──
+# (pyttsx3's runAndWait only spoke the first answer on Windows.) Speak() blocks only this
+# thread, so the camera window keeps running while Nova talks.
 speech_q = queue.Queue()
+TTS_RATE = 1                           # SAPI rate -10..10 (0 = normal)
 
 
 def speaker():
-    ctypes.windll.ole32.CoInitialize(None)
-    import pyttsx3
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()           # COM must be initialised in the thread that uses it
+    voice = win32com.client.Dispatch("SAPI.SpVoice")
+    voice.Rate = TTS_RATE
     while True:
         text = speech_q.get()
-        while not speech_q.empty():    # only speak the newest answer
-            text = speech_q.get()
         try:
-            engine = pyttsx3.init()    # fresh engine per answer avoids runAndWait hangs
-            engine.setProperty("rate", 175)
-            engine.say(text)
-            engine.runAndWait()
-            engine.stop()
+            voice.Speak(text)          # synchronous (flags 0): finish this answer, then the next
         except Exception as e:
             print(f"TTS error: {e}")
+            try:                       # recreate the voice if SAPI got into a bad state
+                voice = win32com.client.Dispatch("SAPI.SpVoice")
+                voice.Rate = TTS_RATE
+            except Exception:
+                pass
 
 
 def say(text):
@@ -126,17 +132,22 @@ def show_answer(a, prefix=""):
     say(a.get("answer"))
 
 
-def send_live(bridge, wav, jpg):
+def send_live(bridge, wav, jpg, require_wake=False):
     t0 = time.perf_counter()
     try:
         files = {"audio": ("question.wav", wav, "audio/wav")}
         if jpg:
             files["image"] = ("frame.jpg", jpg, "image/jpeg")
-        r = requests.post(f"{bridge}/live", files=files, timeout=180)
+        r = requests.post(f"{bridge}/live", files=files, timeout=180,
+                          data={"require_wake": "1" if require_wake else "0"})
         a = r.json()
         if a.get("status") == "empty":
             with S.lock:
                 S.status = "Didn't catch that - hold SPACE and try again"
+        elif a.get("status") == "ignored":
+            with S.lock:
+                S.status = f"No wake word - start with \"Nova\" (heard: {a.get('transcript', '')[:40]})"
+            print(f"ignored (no wake word): {a.get('transcript')}")
         elif a.get("status") != "ok":
             with S.lock:
                 S.status = f"Bridge error: {a.get('error')}"
@@ -239,6 +250,8 @@ def main():
     ap.add_argument("--mic", type=int, default=None, help="input device index (--list-mics)")
     ap.add_argument("--frame-port", type=int, default=5002)
     ap.add_argument("--no-image", action="store_true", help="never send the camera frame")
+    ap.add_argument("--require-wake", action="store_true",
+                    help='only answer when the question starts with "Nova" (default off)')
     ap.add_argument("--list-mics", action="store_true")
     a = ap.parse_args()
     if a.list_mics:
@@ -263,7 +276,8 @@ def main():
     threading.Thread(target=poll_bridge, args=(a.bridge,), daemon=True).start()
     server = ThreadingHTTPServer(("0.0.0.0", a.frame_port), FrameHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"Frame server on port {a.frame_port}. Hold SPACE to talk, Q to quit.")
+    print(f"Frame server on port {a.frame_port}. Hold SPACE to talk, Q to quit."
+          + (' Wake word required: start with "Nova".' if a.require_wake else ""))
 
     cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
     rec, recording, last_jpg_t = Recorder(a.mic), False, 0.0
@@ -292,7 +306,8 @@ def main():
                 with S.lock:
                     S.busy, S.status = True, f"Thinking... ({dur:.1f} s of audio)"
                     jpg = None if a.no_image else S.frame_jpg
-                threading.Thread(target=send_live, args=(a.bridge, wav, jpg), daemon=True).start()
+                threading.Thread(target=send_live, args=(a.bridge, wav, jpg, a.require_wake),
+                                 daemon=True).start()
 
         cv2.imshow(WINDOW, draw(frame, recording))
         key = cv2.waitKey(1) & 0xFF

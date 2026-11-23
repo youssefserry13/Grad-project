@@ -236,6 +236,15 @@ def honesty_verdict(row, case):
     for a grounded summary of the shown page: it names that page and every number it uses
     appears in that page's manual text. Returns (pass, reason)."""
     answer = row["answer"]
+    if row.get("general"):          # camera fallback (/live, ESP): image-only answer
+        if mentioned_pages(answer):
+            return False, "general answer names a page"
+        shown = case.get("shown_page")
+        extra = sorted(_numbers(answer) - _numbers(page_text(shown))) if shown else \
+            sorted(_numbers(answer))
+        if extra:
+            return False, f"general answer has numbers not on the shown page: {extra}"
+        return True, "general description, no manual facts or page"
     if is_not_found(answer):
         return True, "not found"
     if CLARIFY_RE.search(answer):

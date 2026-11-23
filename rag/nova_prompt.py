@@ -93,6 +93,31 @@ B2_PROMPT_ID = "NOVA_IMG_B2_v2"
 # Mode B2 skips the vision model when retrieval is too weak (same score rule as the voice route)
 B2_LOW_SCORE_REPLY = f"{NOT_FOUND_REPLY} Could you ask about a specific part or setting?"
 
+# Camera questions the manual can't answer (/live, ESP): a short honest answer from the image
+# only, like the voice route's chat fallback. No manual facts, no page numbers.
+GENERAL_VISION_PROMPT = (
+    "You are Nova, a voice assistant with a camera. Answer the user's question about the image "
+    "in one or two short sentences that sound natural when read aloud, using only what you can "
+    "actually see (for example: \"I see a person at a desk with a laptop.\"). Plain text only: "
+    "no lists, markdown or symbols. Never mention a manual, page numbers, specifications, "
+    "capacities, part numbers or procedures, and never give operating or safety instructions. "
+    "If you are not sure what something is, say what it looks like."
+)
+# Added when the question or the image is about the machine: the manual had no answer.
+# ("I couldn't find" rather than "isn't covered": a vague question about a real manual page can
+# miss in retrieval although the page is in the manual.)
+GENERAL_NOT_IN_MANUAL = NOT_FOUND_REPLY
+MACHINE_RE = re.compile(
+    r"\b(milling|machines?|manual|spindle|coolant|lubricat\w*|levers?|handwheels?|gears?|arbor|"
+    r"quill|knee|saddle|vise|vice|cutters?|slideways?|diagrams?|schematics?)\b", re.I)
+
+
+def strip_page_mentions(text):
+    """Drop any sentence that names a page (general answers must not cite the manual)."""
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    kept = [s for s in sentences if not re.search(r"\bpages?\s+\d+", s, re.I)]
+    return " ".join(kept).strip()
+
 
 def label_pages(hits):
     """'[Page 51 - 7-4 Section]' first line -> '[Page 51]' + 'Section: 7-4 Section'."""
