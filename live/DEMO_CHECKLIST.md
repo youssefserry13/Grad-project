@@ -15,6 +15,10 @@
 3. **ESP32**: set that URL (if the firmware has the IP hard-coded, it must match; see fallback B).
 4. **Windows terminal**: `py C:\Grad\live\nova_live.py` (other camera: `--camera 1`; mic: `--list-mics`, then `--mic N`; only answer to "Nova ...": `--require-wake`).
 
+**Display for the audience**: open `http://localhost:5001/display` in a browser on the projector/screen, press F11 (full screen).
+Shows the last turns (You / Nova), source badge (Manual p.N / Camera / Chat), input (ESP / Laptop), response time,
+the camera thumbnail for camera answers, and Listening… / Thinking… / Ready.
+
 ## Tune the ESP speech detection in the lab (1 minute, once)
 The ESP streams continuously; the bridge closes an utterance after speech + 0.8 s silence.
 1. Start the bridge with the level print: `STREAM_CALIBRATE=1 ./start_bridge.sh`

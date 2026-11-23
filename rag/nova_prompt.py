@@ -112,6 +112,29 @@ MACHINE_RE = re.compile(
     r"quill|knee|saddle|vise|vice|cutters?|slideways?|diagrams?|schematics?)\b", re.I)
 
 
+# Spoken questions about what the camera sees (/live, ESP) -> image route. Phrase-based: bare
+# "see" / "look" are not enough ("See you", "And you see the machine here", "Look, what is ...").
+_PARTS = (r"machine|part|thing|lever|button|handle|handwheel|switch|knob|component|piece|plate|"
+          r"label|sign|page|tool|device|object|one|screen|panel|gauge|diagram")
+LOOK_RE = re.compile(
+    r"\bwhat (?:do|can|did) you see\b"
+    r"|\b(?:do|can) you see (?:this|that|these|those|it|what|anything)\b"
+    r"|\b(?:look|looking) at (?:this|that|these|those|it|me|my)\b"
+    r"|\b(?:take|have) a look\b"
+    r"|\bwhat(?:'s| is| are) (?:this|that|these|those)\b"
+    r"(?!\s+(?:error|code|alarm|warning|message|word|term|number|value)s?\b)"
+    r"|\bwhat am i (?:holding|pointing at|showing you|looking at)\b"
+    r"|\bwhat are you looking at\b"
+    r"|\b(?:identify|describe) (?:this|that|it|what you see)\b"
+    r"|\bin front of (?:me|you|the camera)\b|\b(?:on|in|through) the camera\b"
+    rf"|\b(?:this|that|these|those) (?:{_PARTS})s?\b",
+    re.I)
+
+
+def is_look_question(text):
+    return bool(LOOK_RE.search(text.replace("’", "'")))
+
+
 def strip_page_mentions(text):
     """Drop any sentence that names a page (general answers must not cite the manual)."""
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())

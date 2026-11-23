@@ -14,6 +14,7 @@
 
 ## Bridge
 - bridge/OllamaBridge.py on port 5001, wake word "Nova" (fuzzy 0.85). Start with bridge/start_bridge.sh.
+- /display (audience screen, polls /last_answer), /status; camera-question detection = nova_prompt.is_look_question (test: rag/test_look_question.py).
 - /live (push-to-talk wav + frame, no wake word), /audio (ESP 256 ms PCM packets, utterance closed after 1 s silence; legacy whole-file JSON still works), /last_answer, /ask, /image.
 - Windows demo client + ESP network script + checklist in live/ (copied to C:\Grad\live).
 

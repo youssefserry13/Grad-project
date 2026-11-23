@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import base64
 import io
+import logging
 import os
 import queue
 import re
@@ -19,9 +20,19 @@ from difflib import SequenceMatcher
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "rag"))
 import rag_query  # noqa: E402
 import image_pipeline  # noqa: E402
-from nova_prompt import NOVA_PROMPT, answer_pages, label_pages  # noqa: E402
+from nova_prompt import NOVA_PROMPT, answer_pages, is_look_question, label_pages  # noqa: E402
 
 app = Flask(__name__)
+
+
+class _QuietPolling(logging.Filter):
+    """Keep the terminal readable: no access-log lines for the display / client polling."""
+    def filter(self, record):
+        msg = record.getMessage()
+        return not any(f"GET {p}" in msg for p in ("/last_answer", "/display"))
+
+
+logging.getLogger("werkzeug").addFilter(_QuietPolling())
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 OLLAMA_HOST = "http://127.0.0.1:11434"   # Ollama now runs inside WSL, same as this script
@@ -114,11 +125,7 @@ ACTION_RE = re.compile(
     r"|\b(send|write|reply to)\b.{0,30}\b(e-?mails?|messages?|texts?|sms)\b"
     r"|\be-?mail (to|my|him|her|them)\b|\bcall (my|me|him|her|them|someone)\b", re.I)
 LIVE_DATA_RE = re.compile(r"\b(weather|forecast|news|headlines?|prices?)\b", re.I)
-# /live and ESP: questions about what the camera sees go to the image route (Mode B2)
-LOOK_RE = re.compile(
-    r"\b(see|seeing|look|looking|camera|in front)\b|\bwhat(?:'s| is| are) (this|these|that)\b"
-    r"|\bthis (machine|part|thing|lever|button|handle|switch|component|piece|one|plate|label|"
-    r"sign|page|tool)\b", re.I)
+# /live and ESP: camera questions are detected by nova_prompt.is_look_question (phrase-based).
 
 # Plain-chat fallback: short and speakable (the reply is read aloud)
 CHAT_SYSTEM = ("You are Nova, a voice assistant. Answer in one or two short sentences that sound "
@@ -284,16 +291,41 @@ def fetch_frame():
         return None, f"no frame from {LIVE_FRAME_URL}: {e}"
 
 
-# Last answer for clients that poll (nova_live.py shows + speaks answers to ESP questions too)
-_last = {"id": 0, "answer": None, "heard": None}
+# Last answer for clients that poll (nova_live.py shows + speaks answers to ESP questions too),
+# plus what /display needs: recent turns, camera thumbnails and a status line.
+_last = {"id": 0, "answer": None, "heard": None,
+         "status": {"state": "ready", "input": None, "since": time.time()}}
 _last_lock = threading.Lock()
+_history = []                     # last HISTORY_N answers (small dicts for the display)
+_thumbs = {}                      # answer id -> JPEG thumbnail of the camera frame used
+HISTORY_N = 8
+STATUS_STALE_S = 60               # a listening/thinking status older than this shows as ready
+INPUT_LABEL = {"esp": "ESP", "live": "Laptop"}
+
+
+def set_status(state, origin=None):
+    with _last_lock:
+        _last["status"] = {"state": state, "input": INPUT_LABEL.get(origin, origin),
+                           "since": time.time()}
 
 
 def publish(result):
+    thumb = result.pop("_thumb", None)
     with _last_lock:
         _last["id"] += 1
         result["id"] = _last["id"]
         _last["answer"] = result
+        _history.append({k: result.get(k) for k in ("id", "origin", "transcript", "answer",
+                                                    "route", "pages", "not_found")}
+                        | {"total_s": result.get("timings", {}).get("total_s"),
+                           "general": "general" in (result.get("route_reason") or ""),
+                           "thumb": bool(thumb), "time": time.strftime("%H:%M:%S")})
+        del _history[:-HISTORY_N]
+        if thumb:
+            _thumbs[result["id"]] = thumb
+        for old in [i for i in _thumbs if i not in {h["id"] for h in _history}]:
+            del _thumbs[old]
+    set_status("ready")
     return result
 
 
@@ -301,7 +333,7 @@ def respond(transcript, origin, image_bytes=None, frame_from_camera=False):
     """Route a spoken question. "Look" questions + a frame -> image route (Mode B2 in single
     mode); everything else -> the voice route (manual RAG / chat / offline refusal)."""
     t0 = time.perf_counter()
-    look = bool(LOOK_RE.search(transcript))
+    look = is_look_question(transcript)
     frame_note = None
     if look and image_bytes is None and frame_from_camera:
         image_bytes, frame_note = fetch_frame()
@@ -310,6 +342,7 @@ def respond(transcript, origin, image_bytes=None, frame_from_camera=False):
     if look and image_bytes:
         try:
             image_b64, img_info = image_pipeline.preprocess(image_bytes)
+            out["_thumb"] = base64.b64decode(image_pipeline.preprocess(image_bytes, max_side=480)[0])
         except image_pipeline.BadImage as e:
             image_b64, out["frame"] = None, f"bad image: {e}"
     else:
@@ -385,6 +418,7 @@ def _calibration_print(ip, m, s):
 
 def _close(ip, s, end, why):
     """Queue s["pcm"][:end] as an utterance; return a fresh stream holding the rest."""
+    set_status("thinking", "esp")
     utt = {"pcm": bytes(s["pcm"][:end]), "packets": s["packets"], "voiced_s": s["voiced_s"],
            "peak_dbfs": s["peak_dbfs"]}
     _utterances.put((ip, utt, why))
@@ -416,6 +450,7 @@ def add_packet(ip, pcm):
                 s["window"] = (s["window"] + [voiced])[-START_WINDOW:]
                 if sum(s["window"]) * FRAME_S >= STREAM_MIN_SPEECH_S:
                     s["speech"] = True       # keep a little audio before the first voiced frame
+                    set_status("listening", "esp")
                     keep = int((START_WINDOW * FRAME_S + STREAM_PREROLL_S) * STREAM_RATE) * 2
                     cut = max(0, s["pos"] - keep)
                     del s["pcm"][:cut]
@@ -466,6 +501,7 @@ def _utterance_worker():
             process_utterance(ip, s, why)
         except Exception as e:      # keep the worker alive whatever happens
             print(f"❌ ESP utterance from {ip} failed: {e!r}")
+            set_status("ready")
 
 
 def process_utterance(ip, s, why):
@@ -485,6 +521,7 @@ def process_utterance(ip, s, why):
     with _last_lock:
         _last["heard"] = {**heard, "wake_word": wake}
     if not wake:
+        set_status("ready")
         print("💤 Wake word not detected, ignoring.")
         return
     command = extract_command(text)
@@ -575,6 +612,15 @@ def handle_audio():
 # answer if the transcript contains the wake word "Nova", which is then stripped).
 @app.route("/live", methods=["POST"])
 def handle_live():
+    set_status("thinking", "live")
+    try:
+        return _handle_live()
+    finally:
+        if _last["status"]["state"] == "thinking":
+            set_status("ready")
+
+
+def _handle_live():
     t0 = time.perf_counter()
     f = request.files.get("audio")
     if f is None:
@@ -607,7 +653,40 @@ def handle_live():
 @app.route("/last_answer", methods=["GET"])
 def handle_last_answer():
     with _last_lock:
-        return jsonify({"id": _last["id"], "answer": _last["answer"], "heard": _last["heard"]}), 200
+        status = dict(_last["status"])
+        if status["state"] != "ready" and time.time() - status["since"] > STATUS_STALE_S:
+            status = {"state": "ready", "input": None, "since": status["since"]}
+        return jsonify({"id": _last["id"], "answer": _last["answer"], "heard": _last["heard"],
+                        "status": status, "history": list(_history)}), 200
+
+
+# ─── Status from the laptop client (push-to-talk: SPACE held = listening) ───
+@app.route("/status", methods=["POST"])
+def handle_status():
+    state = ((request.get_json(silent=True) or {}).get("state") or "").lower()
+    if state not in ("listening", "thinking", "ready"):
+        return jsonify({"status": "error", "error": "state: listening | thinking | ready"}), 400
+    set_status(state, "live")
+    return jsonify({"status": "ok"}), 200
+
+
+# ─── Display page (big screen, readable from 3 m; self-contained, no internet) ─
+DISPLAY_HTML = Path(__file__).with_name("display.html")
+
+
+@app.route("/display", methods=["GET"])
+def handle_display():
+    return DISPLAY_HTML.read_text(encoding="utf-8"), 200, {"Content-Type": "text/html; charset=utf-8",
+                                                          "Cache-Control": "no-store"}
+
+
+@app.route("/display/frame/<int:answer_id>.jpg", methods=["GET"])
+def handle_display_frame(answer_id):
+    with _last_lock:
+        jpg = _thumbs.get(answer_id)
+    if jpg is None:
+        return "", 404
+    return jpg, 200, {"Content-Type": "image/jpeg", "Cache-Control": "max-age=3600"}
 
 # ─── Text Endpoint (testing without audio) ───────────────────────────────────
 @app.route("/ask", methods=["POST"])

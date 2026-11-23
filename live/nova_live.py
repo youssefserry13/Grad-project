@@ -132,6 +132,16 @@ def show_answer(a, prefix=""):
     say(a.get("answer"))
 
 
+def post_status(bridge, state):
+    """Tell the bridge's /display page that SPACE is held (listening) or released."""
+    def go():
+        try:
+            requests.post(f"{bridge}/status", json={"state": state}, timeout=2)
+        except requests.RequestException:
+            pass
+    threading.Thread(target=go, daemon=True).start()
+
+
 def send_live(bridge, wav, jpg, require_wake=False):
     t0 = time.perf_counter()
     try:
@@ -297,11 +307,13 @@ def main():
         if held and not recording and not S.busy:
             rec.start()
             recording = True
+            post_status(a.bridge, "listening")
         elif recording and not held:
             recording = False
             wav, dur = rec.stop()
             if dur < MIN_CLIP_S:
                 S.status = "Too short - hold SPACE while you speak"
+                post_status(a.bridge, "ready")
             else:
                 with S.lock:
                     S.busy, S.status = True, f"Thinking... ({dur:.1f} s of audio)"
