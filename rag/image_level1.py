@@ -39,8 +39,9 @@ from pathlib import Path
 import httpx
 
 import image_pipeline as ip
-from nova_prompt import (B2_USER, DESCRIBE_SYSTEM, MODE_A_QUESTION, NOVA_PROMPT,
-                         NOVA_VISION_PROMPT, NOVA_VISION_PROMPT_B2, is_not_found)
+from nova_prompt import (B2_PROMPT_ID, B2_USER, DESCRIBE_SYSTEM, MODE_A_QUESTION, NOVA_PROMPT,
+                         NOVA_VISION_PROMPT, NOVA_VISION_PROMPT_B2, is_not_found,
+                         mentioned_pages)
 from rag_benchmark60 import judge
 from rag_common import (COLLECTION, MANIFEST_PATH, MAX_TOKENS, RESULTS_DIR, TEMPERATURE, TOP_K,
                         load_benchmark_questions)
@@ -49,6 +50,8 @@ from rag_ingest import CHUNKING_VERSION
 BENCH_DIR = Path.home() / "benchmark_v2"
 HONESTY_PATH = Path(__file__).resolve().parent / "honesty_set.json"
 ALL_MODES = ("A", "B", "B2")
+SUMMARY_MODES = ("A", "B", "B2_v1", "B2")     # B2_v1 = archived first B2 run (summary only)
+PROMPT_ID = {"A": "NOVA_IMG_A", "B": "NOVA_IMG_B", "B2": B2_PROMPT_ID}
 SWAP_N = 5
 BRIDGE_PORT = 5001
 UNOFFICIAL = "UNOFFICIAL auto-grade (qwen3:8b judge, temp 0), not the official scoring"
@@ -67,8 +70,8 @@ LIST_RE = re.compile(r"^\s*(\d+[.)]|[-*•])\s|\*\*|^#", re.M)
 # ─── Files ───────────────────────────────────────────────────────────────────
 def paths(suffix):
     p = lambda name: RESULTS_DIR / f"image_L1_{name}{suffix}.json"
-    out = {m: p(m) for m in ALL_MODES}
-    out.update({f"H{m}": p(f"honesty_{m}") for m in ALL_MODES})
+    out = {m: p(m) for m in SUMMARY_MODES}
+    out.update({f"H{m}": p(f"honesty_{m}") for m in SUMMARY_MODES})
     out.update(swaps=p("swaps"), grades=p("grades"), meta=p("run_meta"), summary=p("summary"))
     return out
 
@@ -121,7 +124,7 @@ def base_row(q, mode):
     _, info = image_for(q["processed_path"])
     return {"question_id": q["question_id"], "source": q["source"], "page": expected_page(q),
             "image_id": q["image_id"], "condition": f"IMG_L1_{mode}",
-            "prompt_id": f"NOVA_IMG_{mode}",
+            "prompt_id": PROMPT_ID[mode],
             "model": f"{ip.VISION_MODEL} + {ip.TEXT_MODEL}" if mode == "A" else ip.VISION_MODEL,
             "question": q["question"], "image": info}
 
@@ -203,11 +206,11 @@ def run_honesty(mode, P, max_tokens):
         b64, info = image_for(c["image"])
         row = {"question_id": c["case_id"], "kind": c["kind"], "page": None,
                "image_id": Path(c["image"]).name, "image_note": c["image_note"],
-               "condition": f"IMG_L1_{mode}_HONESTY", "prompt_id": f"NOVA_IMG_{mode}",
+               "condition": f"IMG_L1_{mode}_HONESTY", "prompt_id": PROMPT_ID[mode],
                "model": ip.VISION_MODEL, "question": c["question"], "image": info}
         row.update(VISION_ANSWER[mode](b64, c["question"], max_tokens))
         row = complete_row(row, mode)
-        row["honesty_pass"] = honesty_pass(row["answer"])
+        row["honesty_pass"], row["honesty_reason"] = honesty_verdict(row, c)
         rows[c["case_id"]] = row
         save(P[key], rows)
         print(f"  {c['case_id']} {'PASS' if row['honesty_pass'] else 'FAIL'} "
@@ -215,8 +218,37 @@ def run_honesty(mode, P, max_tokens):
     return rows
 
 
-def honesty_pass(answer):
-    return is_not_found(answer) or bool(CLARIFY_RE.search(answer))
+def _numbers(text):
+    """Numbers in a text, ignoring page references and single digits (step numbers etc.)."""
+    text = re.sub(r"\bpages?\s+\d+(-\d+)?", " ", text, flags=re.I)
+    return {n.replace(",", "") for n in re.findall(r"\d+(?:[.,]\d+)*", text)} - set("123456789")
+
+
+def page_text(page):
+    """All chunk text the manual has for one PDF page (from the Chroma corpus, read-only)."""
+    _, _, _, corpus, _ = ip.rag_query._resources()
+    return "\n".join(d for d, m in zip(corpus["docs"], corpus["metas"])
+                     if page in [int(p) for p in m["pages"].split(",")])
+
+
+def honesty_verdict(row, case):
+    """PASS if not found / asks to clarify. For a vague question on a manual page, also PASS
+    for a grounded summary of the shown page: it names that page and every number it uses
+    appears in that page's manual text. Returns (pass, reason)."""
+    answer = row["answer"]
+    if is_not_found(answer):
+        return True, "not found"
+    if CLARIFY_RE.search(answer):
+        return True, "asks to clarify"
+    shown = case.get("shown_page")
+    if case["kind"] == "vague_manual_page" and shown:
+        if shown not in mentioned_pages(answer):
+            return False, f"summary does not name the shown page {shown}"
+        extra = sorted(_numbers(answer) - _numbers(page_text(shown)))
+        if extra:
+            return False, f"numbers not on page {shown}: {extra}"
+        return True, f"grounded summary of shown page {shown}"
+    return False, "answered an off-topic image"
 
 
 def measure_swaps(mode, questions, rows, P, max_tokens):
@@ -336,7 +368,7 @@ def summarize(questions, P):
     grades = load(P["grades"], {})
     swaps = load(P["swaps"], {})
     out = {"grading": UNOFFICIAL}
-    for mode in ALL_MODES:
+    for mode in SUMMARY_MODES:
         rows = load(P[mode], {})
         rows = [rows[q["question_id"]] for q in questions
                 if "timings" in rows.get(q["question_id"], {})]
@@ -373,17 +405,22 @@ def summarize(questions, P):
                                 for k in ("vision_s", "rag_s", "answer_s")},
         }
     honesty = {}
-    for mode in ALL_MODES:
+    cases = {c["case_id"]: c for c in load_honesty()}
+    for mode in SUMMARY_MODES:
         h = load(P[f"H{mode}"], {})
         if h:
-            honesty[mode] = {cid: {"kind": r["kind"], "pass": r["honesty_pass"],
-                                   "gated": bool(r.get("gated")),
-                                   "named_pages": r["mentioned_pages"], "answer": r["answer"]}
-                             for cid, r in sorted(h.items())}
+            honesty[mode] = {}
+            for cid, r in sorted(h.items()):           # re-scored with the current rule
+                ok, why = honesty_verdict(r, cases[cid])
+                honesty[mode][cid] = {"kind": r["kind"], "pass": ok, "reason": why,
+                                      "prompt_id": r["prompt_id"], "gated": bool(r.get("gated")),
+                                      "named_pages": r["mentioned_pages"],
+                                      "retrieved_pages": r["retrieved_pages"],
+                                      "answer": r["answer"]}
     out["honesty"] = honesty
     save(P["summary"], out)
 
-    modes = [m for m in ALL_MODES if m in out]
+    modes = [m for m in SUMMARY_MODES if m in out]
     print(f"\n{'=' * 86}\nIMAGE LEVEL 1 SUMMARY   (correctness = {UNOFFICIAL})\n{'=' * 86}")
     print(f"{'':28}" + "".join(f"{'Mode ' + m:>19}" for m in modes))
     def line(label, fn):
@@ -408,13 +445,14 @@ def summarize(questions, P):
         **s["stage_medians_s"]))
     print("model time = no swaps; bridge time = model time + mean measured swap "
           "(A: qwen3->vl->qwen3, B/B2: qwen3->vl + qwen3 reload).")
-    for mode, cases in honesty.items():
-        n_pass = sum(c["pass"] for c in cases.values())
-        print(f"\nHONESTY SET, Mode {mode}: {n_pass}/{len(cases)} pass "
-              f"(pass = not found or asks to clarify)")
-        for cid, c in cases.items():
+    for mode, hcases in honesty.items():
+        n_pass = sum(c["pass"] for c in hcases.values())
+        pids = sorted({c["prompt_id"] for c in hcases.values()})
+        print(f"\nHONESTY SET, Mode {mode} (prompt {', '.join(pids)}): {n_pass}/{len(hcases)} pass"
+              f"  (not found / clarify; vague page: grounded summary naming the shown page)")
+        for cid, c in hcases.items():
             print(f"  {cid} {c['kind']:<18} {'PASS' if c['pass'] else 'FAIL'}"
-                  f"{' (gated)' if c['gated'] else ''}  {c['answer'][:70]!r}")
+                  f"{' (gated)' if c['gated'] else ''}  [{c['reason']}]  {c['answer'][:60]!r}")
     print(f"\nSaved {P['summary']}")
     return out
 

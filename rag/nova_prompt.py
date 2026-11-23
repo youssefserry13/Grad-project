@@ -76,6 +76,8 @@ NOVA_VISION_PROMPT_B2 = (
     "- You may do simple arithmetic on numbers from the manual.\n"
     "- End your answer with the page you used, written as \"Page N\", where N comes from the "
     "[Page N] label of the excerpt that contains the answer.\n"
+    "- If the excerpts contain the answer, give it even if the wording differs from the "
+    "question.\n"
     "- If the image does not show this milling machine or its manual, or the question is too "
     "vague, or the excerpts do not contain the answer, reply exactly: "
     f"{NOT_FOUND_REPLY}\n\n"
@@ -86,6 +88,8 @@ B2_USER = (
     "(Answer in 1 to 3 spoken sentences using only the manual excerpts, no lists, and end with "
     f"\"Page N\". If the excerpts do not answer it, say exactly: {NOT_FOUND_REPLY})"
 )
+# v1 = first B2 run (commit 39f8821); v2 adds the "wording differs" line (Q028 fix).
+B2_PROMPT_ID = "NOVA_IMG_B2_v2"
 # Mode B2 skips the vision model when retrieval is too weak (same score rule as the voice route)
 B2_LOW_SCORE_REPLY = f"{NOT_FOUND_REPLY} Could you ask about a specific part or setting?"
 
