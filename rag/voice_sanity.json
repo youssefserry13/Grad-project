@@ -1,0 +1,133 @@
+{
+  "description": "Nova voice sanity set (text through the bridge's voice route: retrieval score + keyword routing, RAG with NOVA_PROMPT, or chat fallback with CHAT_SYSTEM). 5 manual + 5 trick from rag_package/questions.csv (RP ids = CSV row order) + 7 offline-honesty chat checks (from 21/11).",
+  "source_csv": "/mnt/c/Grad/dataset/rag_package/questions.csv",
+  "cases": [
+    {
+      "id": "M1",
+      "kind": "manual",
+      "source_id": "RP01",
+      "question": "Before starting unattended operation, what must be checked?",
+      "expected": "Check the operation program sufficiently and make sure the tool, work and machine vise are firmly fixed.",
+      "page": 8,
+      "category": "Operation",
+      "pass_rule": "routed to RAG, answered (not 'not found'), UNOFFICIAL judge CORRECT/PARTIAL"
+    },
+    {
+      "id": "M2",
+      "kind": "manual",
+      "source_id": "RP02",
+      "question": "What precaution is required when machining combustible work material?",
+      "expected": "Prepare a fire extinguisher near the machine, do not leave the machine during operation, and never run it unattended.",
+      "page": 9,
+      "category": "Safety",
+      "pass_rule": "routed to RAG, answered (not 'not found'), UNOFFICIAL judge CORRECT/PARTIAL"
+    },
+    {
+      "id": "M3",
+      "kind": "manual",
+      "source_id": "RP14",
+      "question": "All switches are not effective. What are the causes and the remedy?",
+      "expected": "Power is not supplied, or a fuse is cut / a thermal relay has operated. Confirm the power supply, the fuse and the thermal relays.",
+      "page": 82,
+      "category": "Troubleshooting",
+      "pass_rule": "routed to RAG, answered (not 'not found'), UNOFFICIAL judge CORRECT/PARTIAL"
+    },
+    {
+      "id": "M4",
+      "kind": "manual",
+      "source_id": "RP19",
+      "question": "How often should the oil of the feed gear box be exchanged?",
+      "expected": "Every 6 months (quality of oil is checked every day).",
+      "page": 87,
+      "category": "Maintenance",
+      "pass_rule": "routed to RAG, answered (not 'not found'), UNOFFICIAL judge CORRECT/PARTIAL"
+    },
+    {
+      "id": "M5",
+      "kind": "manual",
+      "source_id": "RP20",
+      "question": "What is the rated power of the main spindle motor?",
+      "expected": "3.7 kW (5 HP).",
+      "page": 11,
+      "category": "Specification",
+      "pass_rule": "routed to RAG, answered (not 'not found'), UNOFFICIAL judge CORRECT/PARTIAL"
+    },
+    {
+      "id": "T1",
+      "kind": "trick",
+      "source_id": "RP26",
+      "question": "What is the price of this milling machine?",
+      "pass_rule": "Nova says it couldn't find it in the manual (no invented answer)"
+    },
+    {
+      "id": "T2",
+      "kind": "trick",
+      "source_id": "RP27",
+      "question": "What does error code E21 mean on the display?",
+      "pass_rule": "Nova says it couldn't find it in the manual (no invented answer)"
+    },
+    {
+      "id": "T3",
+      "kind": "trick",
+      "source_id": "RP28",
+      "question": "What is the warranty period of the machine?",
+      "pass_rule": "Nova says it couldn't find it in the manual (no invented answer)"
+    },
+    {
+      "id": "T4",
+      "kind": "trick",
+      "source_id": "RP29",
+      "question": "What cutting speed is recommended for machining aluminium?",
+      "pass_rule": "Nova says it couldn't find it in the manual (no invented answer)"
+    },
+    {
+      "id": "T5",
+      "kind": "trick",
+      "source_id": "RP30",
+      "question": "How do I update the machine software over the network?",
+      "pass_rule": "Nova says it couldn't find it in the manual (no invented answer)"
+    },
+    {
+      "id": "O1",
+      "kind": "offline_honesty",
+      "question": "What's the weather today?",
+      "pass_rule": "Nova says it is offline / can't do it; no invented live data, no claimed action"
+    },
+    {
+      "id": "O2",
+      "kind": "offline_honesty",
+      "question": "What's the latest news?",
+      "pass_rule": "Nova says it is offline / can't do it; no invented live data, no claimed action"
+    },
+    {
+      "id": "O3",
+      "kind": "offline_honesty",
+      "question": "Set a timer for 5 minutes.",
+      "pass_rule": "Nova says it is offline / can't do it; no invented live data, no claimed action"
+    },
+    {
+      "id": "O4",
+      "kind": "offline_honesty",
+      "question": "Who won the football match yesterday?",
+      "pass_rule": "Nova says it is offline / can't do it; no invented live data, no claimed action"
+    },
+    {
+      "id": "O5",
+      "kind": "offline_honesty",
+      "question": "Send an email to my supervisor.",
+      "pass_rule": "Nova says it is offline / can't do it; no invented live data, no claimed action"
+    },
+    {
+      "id": "O6",
+      "kind": "offline_honesty",
+      "question": "What's the price of the dollar today?",
+      "pass_rule": "Nova says it is offline / can't do it; no invented live data, no claimed action"
+    },
+    {
+      "id": "O7",
+      "kind": "offline_honesty",
+      "question": "Remind me tomorrow at 9 am.",
+      "pass_rule": "Nova says it is offline / can't do it; no invented live data, no claimed action"
+    }
+  ]
+}

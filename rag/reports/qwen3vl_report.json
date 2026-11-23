@@ -1,0 +1,605 @@
+{
+  "grading": "UNOFFICIAL auto-grade (qwen3:8b judge, temp 0), not the official scoring",
+  "R1": {
+    "auto_grade": {
+      "correct": 52,
+      "partial": 6,
+      "wrong": 2,
+      "n": 60,
+      "score_pct": 91.7
+    },
+    "model_time_s": {
+      "median": 1.41,
+      "mean": 1.52
+    },
+    "not_found": 1,
+    "truncated": 0
+  },
+  "R1_qwen3vl": {
+    "auto_grade": {
+      "correct": 53,
+      "partial": 6,
+      "wrong": 1,
+      "n": 60,
+      "score_pct": 93.3
+    },
+    "model_time_s": {
+      "median": 1.78,
+      "mean": 1.81
+    },
+    "not_found": 0,
+    "truncated": 0
+  },
+  "R1_same_answer": 13,
+  "R1_grade_diff": {
+    "Q005": [
+      "PARTIAL",
+      "CORRECT"
+    ],
+    "Q012": [
+      "CORRECT",
+      "PARTIAL"
+    ],
+    "Q043": [
+      "WRONG",
+      "PARTIAL"
+    ],
+    "Q059": [
+      "PARTIAL",
+      "CORRECT"
+    ]
+  },
+  "B2_qwen3vl": {
+    "auto_grade": {
+      "correct": 58,
+      "partial": 2,
+      "wrong": 0,
+      "n": 60,
+      "score_pct": 98.3
+    },
+    "gold_page_named": 56,
+    "no_page_named": [],
+    "wrong_page_named": [
+      "Q010",
+      "Q016",
+      "Q017",
+      "Q051"
+    ],
+    "not_found": [],
+    "list_or_markdown": [],
+    "truncated": 0,
+    "model_time_s": {
+      "median": 4.51,
+      "mean": 4.61
+    },
+    "honesty": {
+      "pass": 8,
+      "n": 8,
+      "cases": {
+        "H01": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual. Could you ask about a specific part or setting?"
+        },
+        "H02": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H03": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H04": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H05": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual. Could you ask about a specific part or setting?"
+        },
+        "H06": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H07": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H08": {
+          "pass": true,
+          "reason": "grounded summary of shown page 68",
+          "answer": "You should turn off the main power before inspecting the belt. Check for looseness by pressing the center and confirm movement is 10 to 20 millimetres. Also, examine for lacerations and replace the belt if found. Page 68"
+        }
+      }
+    }
+  },
+  "B2_qwen25vl": {
+    "auto_grade": {
+      "correct": 54,
+      "partial": 5,
+      "wrong": 1,
+      "n": 60,
+      "score_pct": 94.2
+    },
+    "gold_page_named": 58,
+    "no_page_named": [],
+    "wrong_page_named": [
+      "Q016",
+      "Q017"
+    ],
+    "not_found": [],
+    "list_or_markdown": [],
+    "truncated": 0,
+    "model_time_s": {
+      "median": 3.41,
+      "mean": 3.65
+    },
+    "honesty": {
+      "pass": 8,
+      "n": 8,
+      "cases": {
+        "H01": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual. Could you ask about a specific part or setting?"
+        },
+        "H02": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H03": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H04": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual."
+        },
+        "H05": {
+          "pass": true,
+          "reason": "not found",
+          "answer": "I couldn't find that in the manual. Could you ask about a specific part or setting?"
+        },
+        "H06": {
+          "pass": true,
+          "reason": "grounded summary of shown page 11",
+          "answer": "This page provides detailed specifications for the SV-CH / SV-F universal milling machine, including its travel distances, feed speeds, motor power, and other technical details. Page 11"
+        },
+        "H07": {
+          "pass": true,
+          "reason": "grounded summary of shown page 26",
+          "answer": "This section explains the leveling procedure for the milling machine. It involves using a level gauge to ensure the machine is level, positioning the table, saddle, and knee at the center of movement, and adjusting with jack bolts to ensure even load distribution. After adjustment, the machine should be rechecked for levelness. Page 26."
+        },
+        "H08": {
+          "pass": true,
+          "reason": "grounded summary of shown page 68",
+          "answer": "You should inspect the belt of the main spindle drive system every month. Turn off the main power source before inspection. Check for looseness and lacerations, and adjust the belt's movement volume to 10-20 mm. Page 68."
+        }
+      }
+    }
+  },
+  "voice_qwen3vl": {
+    "manual_ok": 5,
+    "manual_grades": {
+      "M1": "CORRECT",
+      "M2": "PARTIAL",
+      "M3": "CORRECT",
+      "M4": "PARTIAL",
+      "M5": "CORRECT"
+    },
+    "manual_page_named": 3,
+    "trick_pass": 5,
+    "offline_pass_rule": 5,
+    "latency_s": {
+      "median": 1.57,
+      "mean": 1.76
+    },
+    "answers": {
+      "M1": [
+        "rag",
+        "According to page 8, before starting unattended operation, you must sufficiently check the operation program and ensure the tool, work, and machine vise are securely fixed."
+      ],
+      "M2": [
+        "rag",
+        "According to page 9, when machining combustible work material, prepare a fire extinguisher nearby, do not leave the machine unattended during operation, and take immediate countermeasures if any problem occurs."
+      ],
+      "M3": [
+        "rag",
+        "According to page 82, the causes are power supply not supplied, wire disconnection by a fuse cut, or operation of thermal relays. The remedy is to confirm the power supply, check the fuse, and inspect the thermal relays."
+      ],
+      "M4": [
+        "rag",
+        "According to page 75, exchange the oil in the feed gear box after three months from delivery, then every six months afterward."
+      ],
+      "M5": [
+        "rag",
+        "According to page 37, the main spindle motor has a rated power of 3.7 kilowatts."
+      ],
+      "T1": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T2": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T3": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T4": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T5": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "O1": [
+        "chat",
+        "I can't check the weather. I don't have internet or live data."
+      ],
+      "O2": [
+        "chat",
+        "I can't access live news. I'm offline and don't have updates."
+      ],
+      "O3": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "O4": [
+        "chat",
+        "I can't check live scores or past match results. You'll need to look it up on a sports website or app."
+      ],
+      "O5": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "O6": [
+        "chat",
+        "I can't check the current exchange rate. I don't have access to live data or financial information."
+      ],
+      "O7": [
+        "chat",
+        "I can't set reminders or alarms. I'm offline and can't access that feature."
+      ]
+    }
+  },
+  "voice_qwen3": {
+    "manual_ok": 5,
+    "manual_grades": {
+      "M1": "CORRECT",
+      "M2": "PARTIAL",
+      "M3": "CORRECT",
+      "M4": "PARTIAL",
+      "M5": "CORRECT"
+    },
+    "manual_page_named": 4,
+    "trick_pass": 5,
+    "offline_pass_rule": 5,
+    "latency_s": {
+      "median": 1.12,
+      "mean": 1.11
+    },
+    "answers": {
+      "M1": [
+        "rag",
+        "According to page 8, before starting unattended operation, you must check the operation program sufficiently and ensure the fixation of the tool, work, and machine vise."
+      ],
+      "M2": [
+        "rag",
+        "According to page 9, do not leave the machine during operation and prepare a fire extinguisher. Also, never make unattended operation of combustible work material processing."
+      ],
+      "M3": [
+        "rag",
+        "According to page 82, the cause is that the power supply is not supplied, a fuse is cut, or the thermal relays are operated. The remedy is to confirm the power supply, check the fuse, and ensure the thermal relays are functioning properly."
+      ],
+      "M4": [
+        "rag",
+        "According to page 75, the oil of the feed gear box should be exchanged every six months after the initial three months from the date of delivery."
+      ],
+      "M5": [
+        "rag",
+        "The rated power of the main spindle motor is 3.7 kilowatts, as stated on page 11."
+      ],
+      "T1": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T2": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T3": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T4": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "T5": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "O1": [
+        "chat",
+        "I can't check the weather. I don't have access to live data or the internet."
+      ],
+      "O2": [
+        "chat",
+        "I can't access the latest news or any live data. Let me know if there's something else I can help with!"
+      ],
+      "O3": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "O4": [
+        "chat",
+        "I can't access live data or past events like football match results."
+      ],
+      "O5": [
+        "rag",
+        "I couldn't find that in the manual."
+      ],
+      "O6": [
+        "chat",
+        "I can't provide real-time information like the current price of the dollar."
+      ],
+      "O7": [
+        "chat",
+        "I can't set reminders or alarms. Let me know if there's something else I can help with."
+      ]
+    }
+  },
+  "phases": {
+    "text": {
+      "ctx": 4096,
+      "peak": {
+        "ram_used_mb": 11116,
+        "swap_used_mb": 3,
+        "ollama_rss_mb": 10131,
+        "gpu_used_mb": 7434
+      },
+      "split": [
+        [
+          "qwen3-vl:8b-instruct",
+          86.1,
+          4096
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0,
+          2048
+        ]
+      ]
+    },
+    "voice_qwen3vl": {
+      "ctx": 4096,
+      "peak": {
+        "ram_used_mb": 11102,
+        "swap_used_mb": 3,
+        "ollama_rss_mb": 10224,
+        "gpu_used_mb": 7405
+      },
+      "split": [
+        [
+          "qwen3-vl:8b-instruct",
+          86.1,
+          4096
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0,
+          2048
+        ]
+      ]
+    },
+    "image_qwen3vl": {
+      "ctx": 4096,
+      "peak": {
+        "ram_used_mb": 11667,
+        "swap_used_mb": 488,
+        "ollama_rss_mb": 10692,
+        "gpu_used_mb": 7583
+      },
+      "split": [
+        [
+          "qwen3-vl:8b-instruct",
+          86.1,
+          4096
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0,
+          2048
+        ]
+      ]
+    },
+    "image_qwen25vl": {
+      "ctx": null,
+      "peak": {
+        "ram_used_mb": 11134,
+        "swap_used_mb": 488,
+        "ollama_rss_mb": 10464,
+        "gpu_used_mb": 7752
+      },
+      "split": [
+        [
+          "qwen2.5vl:7b",
+          86.4,
+          8192
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0,
+          2048
+        ]
+      ]
+    },
+    "voice_qwen3": {
+      "ctx": null,
+      "peak": {
+        "ram_used_mb": 4466,
+        "swap_used_mb": 30,
+        "ollama_rss_mb": 3871,
+        "gpu_used_mb": 7162
+      },
+      "split": [
+        [
+          "qwen3:8b",
+          100.0,
+          8192
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0,
+          2048
+        ]
+      ]
+    }
+  },
+  "vram": {
+    "ctx8192_alone": {
+      "after_load": [
+        [
+          "qwen3-vl:8b-instruct",
+          6618,
+          5155,
+          77.9,
+          8192
+        ]
+      ],
+      "after_requests": [
+        [
+          "qwen3-vl:8b-instruct",
+          77.9
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0
+        ]
+      ],
+      "gpu_used_mb_after_load": 7205,
+      "peak": {
+        "ram_used_mb": 2876,
+        "swap_used_mb": 0,
+        "ollama_rss_mb": 5172,
+        "gpu_used_mb": 7635
+      },
+      "load_s": 4.49,
+      "probe_prompt_tokens": [
+        1699,
+        2982
+      ]
+    },
+    "ctx4096_alone": {
+      "after_load": [
+        [
+          "qwen3-vl:8b-instruct",
+          6038,
+          5196,
+          86.1,
+          4096
+        ]
+      ],
+      "after_requests": [
+        [
+          "qwen3-vl:8b-instruct",
+          86.1
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0
+        ]
+      ],
+      "gpu_used_mb_after_load": 7086,
+      "peak": {
+        "ram_used_mb": 3311,
+        "swap_used_mb": 0,
+        "ollama_rss_mb": 2394,
+        "gpu_used_mb": 7596
+      },
+      "load_s": 6.1,
+      "probe_prompt_tokens": [
+        1699,
+        2982
+      ]
+    },
+    "ctx8192_with_whisper": {
+      "after_load": [
+        [
+          "qwen3-vl:8b-instruct",
+          6618,
+          5155,
+          77.9,
+          8192
+        ]
+      ],
+      "after_requests": [
+        [
+          "qwen3-vl:8b-instruct",
+          77.9
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0
+        ]
+      ],
+      "gpu_used_mb_after_load": 7733,
+      "peak": {
+        "ram_used_mb": 3393,
+        "swap_used_mb": 0,
+        "ollama_rss_mb": 5172,
+        "gpu_used_mb": 7758
+      },
+      "load_s": 30.2,
+      "probe_prompt_tokens": [
+        1699,
+        2982
+      ]
+    },
+    "ctx4096_with_whisper": {
+      "after_load": [
+        [
+          "qwen3-vl:8b-instruct",
+          6038,
+          5196,
+          86.1,
+          4096
+        ]
+      ],
+      "after_requests": [
+        [
+          "qwen3-vl:8b-instruct",
+          86.1
+        ],
+        [
+          "nomic-embed-text:latest",
+          100.0
+        ]
+      ],
+      "gpu_used_mb_after_load": 6977,
+      "peak": {
+        "ram_used_mb": 3814,
+        "swap_used_mb": 0,
+        "ollama_rss_mb": 2363,
+        "gpu_used_mb": 7500
+      },
+      "load_s": 21.04,
+      "probe_prompt_tokens": [
+        1699,
+        2982
+      ]
+    }
+  }
+}
