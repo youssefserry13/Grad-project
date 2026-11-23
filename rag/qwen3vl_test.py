@@ -337,7 +337,7 @@ def step_image_base(a):
 # ─── Step 4: voice route ─────────────────────────────────────────────────────
 BRIDGE_NAMES = {"RAG_MIN_SIMILARITY", "RAG_MIN_SIMILARITY_LEX", "RAG_MIN_BM25", "RAG_MAX_TOKENS",
                 "MACHINE_KEYWORDS", "CHAT_SYSTEM", "keyword_hits", "route", "strip_markdown",
-                "chat_reply", "_answer_question"}
+                "chat_reply", "_answer_question", "ACTION_RE", "LIVE_DATA_RE"}
 
 
 def bridge_voice_route(model):
@@ -350,7 +350,7 @@ def bridge_voice_route(model):
                                                for t in n.targets))]
     ns = {"re": re, "time": time, "rag_query": rag_query, "NOVA_PROMPT": NOVA_PROMPT,
           "answer_pages": answer_pages, "label_pages": label_pages, "client": client(),
-          "TEXT_MODEL": model}
+          "TEXT_MODEL": model, "MODEL_OPTIONS": {"num_ctx": CTX["value"]} if model == VL else {}}
     exec(compile(ast.Module(body=keep, type_ignores=[]), str(BRIDGE), "exec"), ns)
     assert BRIDGE_NAMES <= ns.keys(), BRIDGE_NAMES - ns.keys()
     return ns["_answer_question"]

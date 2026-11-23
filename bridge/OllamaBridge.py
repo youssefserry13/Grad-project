@@ -21,8 +21,17 @@ app = Flask(__name__)
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 OLLAMA_HOST = "http://127.0.0.1:11434"   # Ollama now runs inside WSL, same as this script
-TEXT_MODEL = "qwen3:8b"
-VISION_MODEL = image_pipeline.VISION_MODEL   # qwen2.5vl:7b
+# MODEL_MODE=single (default): qwen3-vl:8b-instruct answers text, voice and images, pinned
+#   (keep_alive=-1), num_ctx 4096, no model swaps; images always use Mode B2.
+# MODEL_MODE=dual (fallback): qwen3:8b for text + qwen2.5vl:7b for images, swapped per image.
+MODEL_MODE = os.environ.get("MODEL_MODE", "single").lower()
+assert MODEL_MODE in ("single", "dual"), "MODEL_MODE must be 'single' or 'dual'"
+if MODEL_MODE == "single":
+    image_pipeline.use_single_model()
+TEXT_MODEL = image_pipeline.TEXT_MODEL       # single: qwen3-vl:8b-instruct | dual: qwen3:8b
+VISION_MODEL = image_pipeline.VISION_MODEL   # single: qwen3-vl:8b-instruct | dual: qwen2.5vl:7b
+MODEL_OPTIONS = image_pipeline.OPTIONS       # single: {"num_ctx": 4096} on every call
+EMBED_MODEL = "nomic-embed-text"
 WHISPER_MODEL = "large-v3-turbo"
 PORT = 5001
 WAKE_WORD = "nova"
@@ -33,9 +42,11 @@ client = ollama.Client(host=OLLAMA_HOST)
 # Image questions: "A" = qwen2.5vl describes -> RAG -> qwen3 answers (model swap),
 #                  "B2" = like B with the stricter spoken/page/honesty prompt + score gate,
 #                  "B" = RAG -> qwen2.5vl answers from image + chunks. Per request: form "mode".
-IMAGE_MODE = os.environ.get("IMAGE_MODE", "A").upper()
+# Single mode always uses B2 (the request's "mode" is ignored).
+IMAGE_MODE = "B2" if MODEL_MODE == "single" else os.environ.get("IMAGE_MODE", "A").upper()
 assert IMAGE_MODE in image_pipeline.MODES, f"IMAGE_MODE must be one of {image_pipeline.MODES}"
-# Only one big model fits in 8 GB VRAM: image swaps and text answers must not overlap.
+# Dual mode: only one big model fits in 8 GB VRAM, so image swaps and text answers must not
+# overlap. Single mode has no swaps; the lock just serialises GPU work.
 GPU_LOCK = threading.Lock()
 
 # ─── RAG routing ─────────────────────────────────────────────────────────────
@@ -57,14 +68,25 @@ MACHINE_KEYWORDS = {
     "panel", "display", "emergency", "workpiece", "vise", "clamp", "bolt", "nut", "screw",
     "rpm", "maintenance", "inspection", "manual", "warranty", "software", "cutting", "machining",
 }
+# Requests Nova can't do offline go to the chat route, which says so (instead of the manual's
+# "I couldn't find that"). Actions always win, even with a machine word ("remind me to oil the
+# machine"). Live-data words only win without a machine word, so "What is the price of this
+# milling machine?" stays a manual question. "alarm" alone stays a machine word ("alarm lamp").
+ACTION_RE = re.compile(
+    r"\b(set|start|create)\b.{0,25}\b(timers?|alarms?|reminders?)\b|\btimers?\b"
+    r"|\bremind (me|us)\b|\breminders?\b|\bwake me\b"
+    r"|\b(send|write|reply to)\b.{0,30}\b(e-?mails?|messages?|texts?|sms)\b"
+    r"|\be-?mail (to|my|him|her|them)\b|\bcall (my|me|him|her|them|someone)\b", re.I)
+LIVE_DATA_RE = re.compile(r"\b(weather|forecast|news|headlines?|prices?)\b", re.I)
 
 # Plain-chat fallback: short and speakable (the reply is read aloud)
 CHAT_SYSTEM = ("You are Nova, a voice assistant. Answer in one or two short sentences that sound "
                "natural when spoken. Plain text only: no markdown, lists, headings, emojis or symbols.\n"
-               "Nova is fully offline. It has no internet, weather, news, clock or timers, alarms, "
-               "reminders, or device control. If asked for any of these, say briefly that you can't "
-               "do that. Never invent live data (weather, news, the current time or date) and never "
-               "claim to perform an action.")
+               "Nova is fully offline. It has no internet, weather, news, prices, clock or timers, "
+               "alarms, reminders, email, messages, phone calls, or device control. If asked for any "
+               "of these, say briefly that you are offline and can't do that. Never invent live data "
+               "(weather, news, prices, scores, the current time or date) and never claim to perform "
+               "an action.")
 
 # ─── Load Whisper + RAG once at startup ──────────────────────────────────────
 print("🔄 Loading Whisper model...")
@@ -74,9 +96,16 @@ print("✅ Whisper ready on GPU")
 print("🔄 Loading RAG (Chroma + BM25)...")
 _, _rag_col, _, _rag_corpus, _ = rag_query._resources()   # cached for the process lifetime
 rag_query.retrieve_scored("warm-up")                       # loads nomic-embed-text
+if MODEL_MODE == "single":   # free VRAM held by models from a previous dual-mode run
+    for _m in image_pipeline.loaded_models() - {TEXT_MODEL, EMBED_MODEL, f"{EMBED_MODEL}:latest"}:
+        client.generate(model=_m, prompt="", keep_alive=0)
+        print(f"⏏️  Unloaded {_m}")
 client.chat(model=TEXT_MODEL, keep_alive=-1, think=False,   # first answer was ~16 s cold, ~1 s warm
-            messages=[{"role": "user", "content": "hi"}], options={"num_predict": 1})
+            messages=[{"role": "user", "content": "hi"}],
+            options={**MODEL_OPTIONS, "num_predict": 1})
 print(f"✅ RAG ready: {len(_rag_corpus['ids'])} chunks from collection '{_rag_col.name}'")
+print(f"✅ MODEL_MODE={MODEL_MODE}: text {TEXT_MODEL}, images {VISION_MODEL} (mode {IMAGE_MODE}), "
+      f"options {MODEL_OPTIONS or 'server default'}")
 
 
 # ─── Fuzzy Wake Word Detection ───────────────────────────────────────────────
@@ -104,14 +133,17 @@ def keyword_hits(question):
                    (w.endswith("s") and w[:-1] in MACHINE_KEYWORDS)})
 
 
-def route(scores, keywords):
-    """Return why the question goes to RAG ("keyword"/"score"), or None for plain chat."""
+def route(scores, keywords, question=""):
+    """Why the question goes where: "keyword"/"score" -> manual RAG;
+    "action" (offline action / live data) or "low_score" -> plain chat."""
+    if ACTION_RE.search(question) or (LIVE_DATA_RE.search(question) and not keywords):
+        return "action"
     if keywords:
         return "keyword"
     sim, bm25 = scores["top_similarity"] or 0.0, scores["top_bm25"]
     if sim >= RAG_MIN_SIMILARITY or (sim >= RAG_MIN_SIMILARITY_LEX and bm25 >= RAG_MIN_BM25):
         return "score"
-    return None
+    return "low_score"
 
 
 def strip_markdown(text):
@@ -138,6 +170,7 @@ def chat_reply(command):
         messages=[{"role": "system", "content": CHAT_SYSTEM},
                   {"role": "user", "content": command}],
         think=False,  # thinking off for voice: latency matters
+        options=dict(MODEL_OPTIONS) or None,
     )
     return response["message"]["content"]
 
@@ -152,10 +185,10 @@ def _answer_question(question):
     t0 = time.perf_counter()
     hits, scores = rag_query.retrieve_scored(question)
     keywords = keyword_hits(question)
-    reason = route(scores, keywords)
-    if reason:
+    reason = route(scores, keywords, question)
+    if reason in ("keyword", "score"):
         r = rag_query.ask_rag(question, prompt=NOVA_PROMPT, hits=label_pages(hits),
-                              max_tokens=RAG_MAX_TOKENS)
+                              max_tokens=RAG_MAX_TOKENS, model=TEXT_MODEL, options=MODEL_OPTIONS)
         pages = answer_pages(r["answer"], r["retrieved_pages"], r["not_found"])
         out = {"source": "rag", "answer": r["answer"], "not_found": r["not_found"],
                "pages": pages, "retrieved_pages": r["retrieved_pages"]}
@@ -163,7 +196,7 @@ def _answer_question(question):
         out = {"source": "chat", "answer": chat_reply(question), "not_found": False,
                "pages": [], "retrieved_pages": []}
     out["answer"] = strip_markdown(out["answer"])
-    out.update(route_reason=reason or "low_score", keywords=keywords, scores=scores,
+    out.update(route_reason=reason, keywords=keywords, scores=scores,
                latency_s=round(time.perf_counter() - t0, 3))
     print(f"📚 {out['source']} ({out['route_reason']}) {scores} kw={keywords} "
           f"pages={out['pages']} {out['latency_s']}s")
@@ -260,6 +293,10 @@ def handle_image():
         legacy = True
 
     question = (question or "").strip() or image_pipeline.DEFAULT_QUESTION
+    if MODEL_MODE == "single":       # one model: always B2, no swaps
+        if mode and mode.strip().upper() != IMAGE_MODE:
+            print(f"ℹ️  mode {mode!r} requested; single-model mode uses {IMAGE_MODE}")
+        mode = IMAGE_MODE
     mode = (mode or IMAGE_MODE).strip().upper()
     if mode not in image_pipeline.MODES:
         return jsonify({"status": "error", "error": f"mode must be one of {image_pipeline.MODES}, got {mode!r}"}), 400

@@ -7,7 +7,9 @@
 - Pin av==18.1.0 (av 19 breaks faster-whisper 1.2.1).
 
 ## Models
-- qwen3:8b (text, think off), qwen2.5vl:7b (vision), nomic-embed-text (embeddings), Whisper large-v3-turbo.
+- Bridge default (MODEL_MODE=single): qwen3-vl:8b-instruct for text + voice + images, ctx 4096, pinned, no swaps (86% GPU).
+- MODEL_MODE=dual fallback: qwen3:8b (text, think off) + qwen2.5vl:7b (vision). Benchmark/R1/judge scripts still use qwen3:8b.
+- nomic-embed-text (embeddings), Whisper large-v3-turbo.
 - Only 8GB VRAM: never run two big models at once.
 
 ## Bridge

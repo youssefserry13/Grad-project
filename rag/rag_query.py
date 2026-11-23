@@ -105,7 +105,8 @@ def _ordered_pages(hits):
 
 
 def ask_rag(question: str, k: int = TOP_K, mode: str = "hybrid", prompt: dict | None = None,
-            hits: list | None = None, max_tokens: int = MAX_TOKENS) -> dict:
+            hits: list | None = None, max_tokens: int = MAX_TOKENS, model: str | None = None,
+            options: dict | None = None) -> dict:
     """Retrieve top-k chunks and answer with prompt P03 (default; the frozen benchmark setting).
 
     Returns {answer, not_found, cited_pages, retrieved, latency_s, retrieval_s, generation_s}.
@@ -117,6 +118,8 @@ def ask_rag(question: str, k: int = TOP_K, mode: str = "hybrid", prompt: dict | 
                   "not_found": phrase the prompt uses for "no answer"}; P03 when None
       hits       reuse hits from retrieve()/retrieve_scored() instead of retrieving again
       max_tokens generation limit (default 1024)
+      model      answer model (default LLM_MODEL = qwen3:8b, the benchmark setting)
+      options    extra Ollama options, e.g. {"num_ctx": 4096} (bridge single-model mode)
     """
     client, _, _, _, p03 = _resources()
     prompt = prompt or p03
@@ -128,12 +131,12 @@ def ask_rag(question: str, k: int = TOP_K, mode: str = "hybrid", prompt: dict | 
 
     context = "\n\n---\n\n".join(h["text"] for h in hits)
     resp = client.chat(
-        model=LLM_MODEL,
+        model=model or LLM_MODEL,
         messages=[{"role": "system", "content": prompt["system_prompt"].replace("{context}", context)},
                   {"role": "user", "content": prompt["user_template"].replace("{question}", question)}],
         think=False,
         keep_alive=-1,
-        options={"temperature": TEMPERATURE, "num_predict": max_tokens},
+        options={**(options or {}), "temperature": TEMPERATURE, "num_predict": max_tokens},
     )
     t2 = time.perf_counter()
 

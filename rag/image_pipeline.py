@@ -47,6 +47,23 @@ UNLOAD_TIMEOUT_S = 30
 # (Not 0: batch tests make many vision calls in a row and would reload it every call.)
 KEEP_ALIVE = {TEXT_MODEL: -1, VISION_MODEL: os.environ.get("IMAGE_VISION_KEEP_ALIVE", "2m")}
 
+# Single-model mode (bridge MODEL_MODE=single): qwen3-vl does text and images, pinned, no swaps.
+# ctx 4096 fits more of it on the GPU than 8192 (86% vs 78%) and is enough (largest prompt ~3.4k
+# tokens). Every call to it must pass the same num_ctx, else Ollama reloads the model.
+SINGLE_MODEL = "qwen3-vl:8b-instruct"
+SINGLE_NUM_CTX = 4096
+OPTIONS = {}             # extra Ollama options for every big-model call (num_ctx in single mode)
+
+
+def use_single_model(model=SINGLE_MODEL, num_ctx=SINGLE_NUM_CTX):
+    """Switch this module to one model for text + vision (call once at startup)."""
+    global TEXT_MODEL, VISION_MODEL, BIG_MODELS
+    TEXT_MODEL = VISION_MODEL = model
+    BIG_MODELS = (model,)
+    KEEP_ALIVE[model] = -1
+    OPTIONS.clear()
+    OPTIONS["num_ctx"] = num_ctx
+
 
 def _client():
     return rag_query._resources()[0]
@@ -109,7 +126,8 @@ def use_only(model, keep_alive=None):
                     raise RuntimeError(f"{other} did not unload within {UNLOAD_TIMEOUT_S}s")
                 time.sleep(0.1)
     if model not in loaded:
-        client.generate(model=model, prompt="", keep_alive=keep_alive)  # empty prompt = load only
+        client.generate(model=model, prompt="", keep_alive=keep_alive,  # empty prompt = load only
+                        options=dict(OPTIONS) or None)
     return round(time.perf_counter() - t0, 3)
 
 
@@ -122,7 +140,7 @@ def describe(image_b64, question, max_tokens):
         messages=[{"role": "system", "content": DESCRIBE_SYSTEM},
                   {"role": "user", "content": DESCRIBE_USER.format(question=question),
                    "images": [image_b64]}],
-        options={"temperature": TEMPERATURE, "num_predict": max_tokens})
+        options={**OPTIONS, "temperature": TEMPERATURE, "num_predict": max_tokens})
     return {"description": _strip_think(resp["message"]["content"]),
             "description_raw": resp["message"]["content"],
             "description_usage": _usage(resp), "description_done_reason": resp.get("done_reason"),
@@ -135,7 +153,8 @@ def answer_from_description(question, description, max_tokens):
     hits, scores = rag_query.retrieve_scored(f"{question}\n{description}", TOP_K)
     rag_s = round(time.perf_counter() - t0, 3)
     r = rag_query.ask_rag(MODE_A_QUESTION.format(question=question, description=description),
-                          prompt=NOVA_PROMPT, hits=label_pages(hits), max_tokens=max_tokens)
+                          prompt=NOVA_PROMPT, hits=label_pages(hits), max_tokens=max_tokens,
+                          model=TEXT_MODEL, options=OPTIONS)
     return {"answer_raw": r["content"], "answer": r["answer"], "not_found": r["not_found"],
             "retrieved_pages": r["retrieved_pages"], "retrieved": r["retrieved"],
             "scores": scores, "usage": r["usage"], "done_reason": r["done_reason"],
@@ -169,7 +188,7 @@ def answer_with_vision(image_b64, question, max_tokens, system=NOVA_VISION_PROMP
         messages=[{"role": "system", "content": system.replace("{context}", context)},
                   {"role": "user", "content": user.replace("{question}", question),
                    "images": [image_b64]}],
-        options={"temperature": TEMPERATURE, "num_predict": max_tokens})
+        options={**OPTIONS, "temperature": TEMPERATURE, "num_predict": max_tokens})
     t2 = time.perf_counter()
     content = resp["message"]["content"]
     answer = _strip_think(content)

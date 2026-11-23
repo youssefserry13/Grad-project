@@ -23,3 +23,25 @@ image ~3.4k tokens (1024 px), longest answer 82 tokens, so ctx 4096 is enough.
 
 Settings: temperature 0, max tokens 1024, hybrid retrieval top-5, image 1024 px, B2 prompt NOVA_IMG_B2_v2,
 qwen2.5vl baseline rerun with the same v2 prompt (its 6 earlier v2 rows matched exactly). Ollama 0.40.16.
+
+## Bridge in single mode (2026-11-24, `rag/bridge_check.py`)
+
+`MODEL_MODE=single` (default): qwen3-vl:8b-instruct pinned, num_ctx 4096, 14%/86% CPU/GPU, no swaps,
+images always B2. `MODEL_MODE=dual` keeps the old qwen3:8b + qwen2.5vl:7b setup.
+
+RAM (`free`: used excludes buff/cache; total 11.7 GiB, swap 8 GiB), 2 rounds of 20 mixed requests
+(8 /ask, 8 /image B2, 4 /audio through Whisper):
+
+| | used | buff/cache | available | swap |
+|---|---|---|---|---|
+| bridge idle (model loaded) | 2.4 GiB | 10 GiB | 9.3 GiB | 28 MiB |
+| after round 1 | 7.0 GiB | 5.6 GiB | 4.7 GiB | 29 MiB |
+| round 2 peak / after | 6.1 GiB peak, 7.3 GiB after | 5.1 GiB | 4.4 GiB min | 31 MiB |
+
+Used grows during the first requests (llama-server anonymous memory reaches ~4.3 GB as the CPU part
+and vision buffers warm up), then stays flat at ~6 GB with >=4.4 GiB available.
+
+Voice sanity through the bridge (/ask): manual 5/5 (judge 3 CORRECT, 2 PARTIAL), trick 5/5, offline 7/7
+(after the routing fix: timer/remind/email/send/call/set-alarm -> chat always; weather/news/price -> chat
+unless a machine word is present). Manual pages named: 3/5 match the CSV page (M4 cites p75, M5 p37;
+qwen3:8b also cited p75 for M4). Routing of the 60 benchmark + 30 rag_package questions is unchanged.
