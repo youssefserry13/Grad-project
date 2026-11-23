@@ -45,10 +45,21 @@ WAKE_WORD = "nova"
 WAKE_THRESHOLD = 0.85
 
 # ESP32 streaming on /audio: 256 ms packets of 16 kHz 16-bit mono PCM (8192 bytes), buffered per
-# client IP. An utterance ends when no packet arrives for STREAM_SILENCE_S (or at STREAM_MAX_S).
+# client IP. An utterance ends after speech + STREAM_END_SILENCE_S of silence (continuous stream),
+# when no packet arrives for STREAM_SILENCE_S, or at STREAM_MAX_S of speech.
 STREAM_RATE = 16000
-STREAM_SILENCE_S = float(os.environ.get("STREAM_SILENCE_S", 1.0))
+STREAM_SILENCE_S = float(os.environ.get("STREAM_SILENCE_S", 1.0))      # no packets -> close
 STREAM_MAX_S = float(os.environ.get("STREAM_MAX_S", 30))
+STREAM_END_SILENCE_S = float(os.environ.get("STREAM_END_SILENCE_S", 0.8))  # silence after speech
+STREAM_MIN_SPEECH_S = float(os.environ.get("STREAM_MIN_SPEECH_S", 0.2))   # voiced time to start
+STREAM_PREROLL_S = 0.3                    # audio kept before speech starts (soft first syllable)
+# Speech threshold in dBFS, or "auto" (noise floor + margin). Measured on the real ESP mic at home:
+# floor ~ -74 dBFS, speech mostly -60 to -25 dBFS.
+STREAM_SPEECH_DBFS = os.environ.get("STREAM_SPEECH_DBFS", "auto").strip().lower()
+STREAM_AUTO_MARGIN_DB = float(os.environ.get("STREAM_AUTO_MARGIN_DB", 12))
+STREAM_MIN_DBFS = float(os.environ.get("STREAM_MIN_DBFS", -65))    # auto never goes below this
+STREAM_DEFAULT_DBFS = -60.0                                         # auto, first 2 s
+STREAM_CALIBRATE = os.environ.get("STREAM_CALIBRATE", "0") == "1"   # level print once per second
 STREAM_PACKET_MAX_BYTES = 32000          # JSON raw-PCM payloads up to 1 s count as stream packets
 # Camera for ESP "look" questions: nova_live.py on Windows serves its latest frame on port 5002.
 # From WSL (NAT mode) Windows is the default gateway, not localhost. Override with LIVE_FRAME_URL.
@@ -319,32 +330,124 @@ def respond(transcript, origin, image_bytes=None, frame_from_camera=False):
     return out
 
 
-# ─── ESP32 stream: per-IP packet buffers, closed after STREAM_SILENCE_S ──────
-_streams = {}                    # ip -> {"pcm": bytearray, "first": t, "last": t, "packets": n}
+# ─── ESP32 stream: per-IP buffers, speech detection, utterance end ──────────
+# Two ways an utterance ends:
+#   1. speech end: speech was heard, then STREAM_END_SILENCE_S of silence (continuous streaming,
+#      the firmware noise gate is 0, so packets never stop);
+#   2. no packets for STREAM_SILENCE_S (firmware that only sends while someone speaks).
+# Speech = 32 ms frames with RMS >= threshold. Threshold: STREAM_SPEECH_DBFS as a number
+# (fixed, dBFS) or "auto" = noise floor (20th percentile of the last 10 s) + STREAM_AUTO_MARGIN_DB,
+# never below STREAM_MIN_DBFS. STREAM_CALIBRATE=1 prints the level once per second per client.
+_streams = {}                    # ip -> utterance being collected (see _new_stream)
+_meters = {}                     # ip -> level history, kept across utterances (noise floor)
 _streams_lock = threading.Lock()
 _utterances = queue.Queue()      # closed utterances, processed one at a time
+FRAME = 512                                         # samples per analysis frame (32 ms)
+FRAME_S = FRAME / STREAM_RATE
+START_WINDOW = int(0.5 / FRAME_S)                   # speech starts: enough voiced frames in 0.5 s
+
+
+def _new_stream(now, pcm=b""):
+    return {"pcm": bytearray(pcm), "pos": 0, "first": now, "last": now, "packets": 0,
+            "speech": False, "speech_at": 0, "silence_s": 0.0, "voiced_s": 0.0,
+            "window": [], "peak_dbfs": -120.0}
+
+
+def _new_meter():
+    return {"hist": [], "cal": [], "thr": STREAM_DEFAULT_DBFS}
+
+
+def _threshold(m):
+    if STREAM_SPEECH_DBFS != "auto":
+        return float(STREAM_SPEECH_DBFS)
+    if len(m["hist"]) < int(2 / FRAME_S):          # first 2 s: no floor estimate yet
+        return STREAM_DEFAULT_DBFS
+    floor = float(np.percentile(m["hist"], 20))
+    return max(floor + STREAM_AUTO_MARGIN_DB, STREAM_MIN_DBFS)
+
+
+def _calibration_print(ip, m, s):
+    cal, m["cal"] = m["cal"], []
+    floor = np.percentile(m["hist"], 20)
+    print(f"📊 ESP {ip} level median {np.median(cal):6.1f} max {max(cal):6.1f} dBFS | floor "
+          f"{floor:6.1f} | threshold {m['thr']:6.1f} ({STREAM_SPEECH_DBFS}) | "
+          f"{'SPEECH' if s['speech'] else 'silence'}")
+
+
+def _close(ip, s, end, why):
+    """Queue s["pcm"][:end] as an utterance; return a fresh stream holding the rest."""
+    utt = {"pcm": bytes(s["pcm"][:end]), "packets": s["packets"], "voiced_s": s["voiced_s"],
+           "peak_dbfs": s["peak_dbfs"]}
+    _utterances.put((ip, utt, why))
+    return _new_stream(s["last"], s["pcm"][end:])
 
 
 def add_packet(ip, pcm):
     now = time.monotonic()
     with _streams_lock:
-        s = _streams.setdefault(ip, {"pcm": bytearray(), "first": now, "last": now, "packets": 0})
+        s = _streams.get(ip) or _new_stream(now)
+        m = _meters.setdefault(ip, _new_meter())
         s["pcm"] += pcm
         s["last"] = now
         s["packets"] += 1
-        buffered_s = len(s["pcm"]) / (2 * STREAM_RATE)
-        if buffered_s >= STREAM_MAX_S:             # never-ending stream: cut it here
-            _utterances.put((ip, _streams.pop(ip), "max length"))
-    return buffered_s
+        m["thr"] = _threshold(m)
+        while len(s["pcm"]) - s["pos"] >= 2 * FRAME:
+            x = np.frombuffer(s["pcm"], np.int16, count=FRAME, offset=s["pos"]).astype(np.float32)
+            s["pos"] += 2 * FRAME
+            db = max(20 * np.log10(np.sqrt(np.mean((x / 32768) ** 2)) + 1e-9), -120.0)
+            m["hist"].append(db)
+            del m["hist"][:-int(10 / FRAME_S)]
+            m["cal"].append(db)
+            if STREAM_CALIBRATE and len(m["cal"]) >= int(1 / FRAME_S):
+                _calibration_print(ip, m, s)
+            elif len(m["cal"]) >= int(1 / FRAME_S):
+                m["cal"] = []
+            voiced = db >= m["thr"]
+            if not s["speech"]:
+                s["window"] = (s["window"] + [voiced])[-START_WINDOW:]
+                if sum(s["window"]) * FRAME_S >= STREAM_MIN_SPEECH_S:
+                    s["speech"] = True       # keep a little audio before the first voiced frame
+                    keep = int((START_WINDOW * FRAME_S + STREAM_PREROLL_S) * STREAM_RATE) * 2
+                    cut = max(0, s["pos"] - keep)
+                    del s["pcm"][:cut]
+                    s["pos"] -= cut
+                    s["speech_at"] = s["pos"]
+                    s["voiced_s"] = sum(s["window"]) * FRAME_S
+                elif len(s["pcm"]) >= STREAM_MAX_S * 2 * STREAM_RATE:   # long noise: drop it
+                    keep = int(STREAM_PREROLL_S * STREAM_RATE) * 2
+                    cut = s["pos"] - keep
+                    del s["pcm"][:cut]
+                    s["pos"] -= cut
+                continue
+            s["peak_dbfs"] = max(s["peak_dbfs"], db)
+            if voiced:
+                s["silence_s"] = 0.0
+                s["voiced_s"] += FRAME_S
+            else:
+                s["silence_s"] += FRAME_S
+            if s["silence_s"] >= STREAM_END_SILENCE_S:
+                s = _close(ip, s, s["pos"], "speech end")
+            elif (s["pos"] - s["speech_at"]) / (2 * STREAM_RATE) >= STREAM_MAX_S:
+                s = _close(ip, s, s["pos"], "max length")
+        _streams[ip] = s
+        return len(s["pcm"]) / (2 * STREAM_RATE)
 
 
 def _stream_watchdog():
+    """Rule 2: no packets for STREAM_SILENCE_S closes the utterance (a sender that only streams
+    while someone talks, or the ESP stopped). Buffers without detected speech are dropped, so a
+    stopped continuous stream doesn't send up to STREAM_MAX_S of noise to Whisper."""
     while True:
         time.sleep(0.1)
         now = time.monotonic()
         with _streams_lock:
             for ip in [ip for ip, s in _streams.items() if now - s["last"] >= STREAM_SILENCE_S]:
-                _utterances.put((ip, _streams.pop(ip), "silence"))
+                s = _streams.pop(ip)
+                if s["speech"]:
+                    _close(ip, s, len(s["pcm"]), "no packets")
+                elif len(s["pcm"]) >= STREAM_RATE:
+                    print(f"🔇 ESP {ip}: packets stopped, dropped {len(s['pcm']) / 32000:.1f}s "
+                          f"without speech (threshold {_meters[ip]['thr']:.1f} dBFS)")
 
 
 def _utterance_worker():
@@ -365,9 +468,10 @@ def process_utterance(ip, s, why):
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     text, lang, whisper_s = transcribe(audio)
     heard = {"ip": ip, "transcript": text, "language": lang, "audio_s": round(dur, 2),
-             "packets": s["packets"], "closed_by": why, "whisper_s": whisper_s,
+             "voiced_s": round(s["voiced_s"], 2), "closed_by": why, "whisper_s": whisper_s,
              "time": time.strftime("%H:%M:%S")}
-    print(f"🎤 ESP {ip}: {s['packets']} packets, {dur:.2f}s ({why}) -> '{text}' {whisper_s}s")
+    print(f"🎤 ESP {ip}: {dur:.2f}s ({why}, voiced {s['voiced_s']:.2f}s, peak "
+          f"{s['peak_dbfs']:.0f} dBFS) -> '{text}' {whisper_s}s")
     wake = wake_word_detected(text.lower())
     with _last_lock:
         _last["heard"] = {**heard, "wake_word": wake}

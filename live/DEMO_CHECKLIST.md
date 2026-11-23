@@ -15,6 +15,15 @@
 3. **ESP32**: set that URL (if the firmware has the IP hard-coded, it must match; see fallback B).
 4. **Windows terminal**: `py C:\Grad\live\nova_live.py` (other camera: `--camera 1`; mic: `--list-mics`, then `--mic N`).
 
+## Tune the ESP speech detection in the lab (1 minute, once)
+The ESP streams continuously; the bridge closes an utterance after speech + 0.8 s silence.
+1. Start the bridge with the level print: `STREAM_CALIBRATE=1 ./start_bridge.sh`
+2. Stay quiet 5 s, then talk 5 s. Read the `📊 ESP ... level median X max Y | floor F | threshold T` lines.
+   Quiet seconds should say `silence`, talking seconds `SPEECH`. Home values: floor −74 dBFS, speech −60 to −25, threshold ≈ −62 (auto).
+3. If quiet shows `SPEECH` (noise too high): `STREAM_SPEECH_DBFS=-45 ./start_bridge.sh` (a fixed value a few dB under your talking `max`),
+   or raise the auto margin: `STREAM_AUTO_MARGIN_DB=18`. If talking shows `silence`: speak closer / louder, or lower the fixed value.
+4. Answers come too early (cut mid-sentence): `STREAM_END_SILENCE_S=1.2`. Too slow: `0.6`. Then restart without `STREAM_CALIBRATE`.
+
 ## Quick test for each link (2 minutes)
 | # | Link | Test | Expect |
 |---|---|---|---|
@@ -35,7 +44,8 @@
 - **6 fails**: lab Wi-Fi isolates devices → **fallback A**: phone hotspot, connect laptop + ESP to it, rerun step 2 (new IP!).
 - **7: nothing in the bridge log**: ESP not reaching the laptop (wrong IP / not on same Wi-Fi), see 6.
 - **7: log shows the transcript but "Wake word not detected"**: say "Nova" clearly at the start; the window shows "ESP heard (no wake word): ...".
-- **7: answer only after ~30 s**: the ESP never pauses sending; the bridge closes an utterance after 1 s without packets (`STREAM_SILENCE_S`), else at 30 s.
+- **7: answer only after ~30 s**: speech never "ends" (noise above the threshold) → see *Tune the ESP speech detection*; the hard cut is `STREAM_MAX_S=30`.
+- **7: bridge log shows `🔇 dropped ... without speech`**: threshold too high for your voice level → tune (above).
 - **Fallback B (ESP dead)**: demo everything with the webcam client (push-to-talk), same answers.
 - After a reboot or Wi-Fi change: rerun step 2 (WSL and laptop IPs change).
 
