@@ -253,6 +253,40 @@ def run_mode_b2(image_b64, question, max_tokens, restore_text=True):
     return finish({**b, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "B2")
 
 
+LOOK_DESCRIBE_TOKENS = 120   # short description: it only feeds retrieval (speed matters live)
+
+
+def run_mode_b2_look(image_b64, question, max_tokens, restore_text=True):
+    """B2 for spoken camera questions (/live, ESP). Vague questions ("What is this part?") give
+    too weak a retrieval on the question alone, so B2's gate stops them. Then: the vision model
+    describes the image, retrieval is redone on question + description (like Mode A), and B2
+    answers from the image + those excerpts. The gate still applies to the new retrieval, so
+    off-topic images stay "not found". No extra swap in single-model mode."""
+    out = run_mode_b2(image_b64, question, max_tokens, restore_text=restore_text)
+    if not out.get("gated"):
+        out["look_fallback"] = False
+        return out
+    steps = {"to_vision_s": use_only(VISION_MODEL)}
+    d = describe(image_b64, question, min(max_tokens, LOOK_DESCRIBE_TOKENS))
+    t0 = time.perf_counter()
+    hits, scores = rag_query.retrieve_scored(f"{question}\n{d['description']}", TOP_K)
+    rag_s = round(time.perf_counter() - t0, 3)
+    if retrieval_ok(scores):
+        b = answer_b2(image_b64, question, max_tokens, retrieved=(hits, scores, rag_s))
+        b["vision_s"] = round(b["vision_s"] + d["vision_s"], 3)
+    else:
+        b = {"answer_raw": "", "answer": B2_LOW_SCORE_REPLY, "not_found": True, "gated": True,
+             "retrieved_pages": [], "retrieved": [], "scores": scores, "usage": {},
+             "done_reason": "gated", "rag_s": rag_s, "vision_s": d["vision_s"]}
+    if restore_text:
+        steps["to_text_s"] = use_only(TEXT_MODEL)
+    b["rag_s"] = round(b["rag_s"] + out["timings"]["rag_s"], 3)
+    res = finish({**b, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "B2")
+    res.update(look_fallback=True, description=d["description"],
+               first_scores=out["scores"])
+    return res
+
+
 def run(image_b64, question, mode, max_tokens):
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}")

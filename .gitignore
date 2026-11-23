@@ -3,3 +3,4 @@ venv/
 rag/chroma_db/
 rag/results/
 __pycache__/
+bridge/last_utterance.wav

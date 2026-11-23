@@ -13,7 +13,9 @@
 - Only 8GB VRAM: never run two big models at once.
 
 ## Bridge
-- bridge/OllamaBridge.py on port 5001, wake word "Nova" (fuzzy 0.85).
+- bridge/OllamaBridge.py on port 5001, wake word "Nova" (fuzzy 0.85). Start with bridge/start_bridge.sh.
+- /live (push-to-talk wav + frame, no wake word), /audio (ESP 256 ms PCM packets, utterance closed after 1 s silence; legacy whole-file JSON still works), /last_answer, /ask, /image.
+- Windows demo client + ESP network script + checklist in live/ (copied to C:\Grad\live).
 
 ## Benchmark v2.0 (FROZEN)
 - Never edit benchmark_manifest.xlsx, frozen_prompts.json, benchmark images, or results/raw_outputs/*.
