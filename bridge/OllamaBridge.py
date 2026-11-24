@@ -20,7 +20,8 @@ from difflib import SequenceMatcher
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "rag"))
 import rag_query  # noqa: E402
 import image_pipeline  # noqa: E402
-from nova_prompt import NOVA_PROMPT, answer_pages, is_look_question, label_pages  # noqa: E402
+from nova_prompt import (NOVA_PROMPT, answer_pages, is_look_question, label_pages,  # noqa: E402
+                         needs_camera)
 
 app = Flask(__name__)
 
@@ -134,7 +135,11 @@ CHAT_SYSTEM = ("You are Nova, a voice assistant. Answer in one or two short sent
                "alarms, reminders, email, messages, phone calls, or device control. If asked for any "
                "of these, say briefly that you are offline and can't do that. Never invent live data "
                "(weather, news, prices, scores, the current time or date) and never claim to perform "
-               "an action.")
+               "an action.\n"
+               "Nova does have a camera: questions about what Nova sees are answered from the camera "
+               "image, so never say that you can't see, have no eyes or have no camera.")
+# Said when a "Can you see me?"-type question arrives but no camera frame could be obtained
+NO_FRAME_REPLY = "I couldn't get a picture from the camera. Please check the camera and ask again."
 
 # ─── Load Whisper + RAG once at startup ──────────────────────────────────────
 print("🔄 Loading Whisper model...")
@@ -143,7 +148,9 @@ WHISPER_LOCK = threading.Lock()   # one transcription at a time (/audio, /live, 
 _t = time.perf_counter()          # warm-up: the first transcription (+ VAD model) is ~5 s slower
 _noise = (np.random.default_rng(0).standard_normal(16000) * 0.01).astype(np.float32)
 list(whisper.transcribe(_noise, language="en")[0])                     # loads the decoder
-list(whisper.transcribe(_noise, language="en", vad_filter=True)[0])     # loads the VAD model
+list(whisper.transcribe(_noise, language="en", vad_filter=True,          # VAD + the prompt path
+                        initial_prompt=WHISPER_PROMPT)[0])
+list(whisper.transcribe(np.tile(_noise, 3) * 20, language="en", initial_prompt=WHISPER_PROMPT)[0])
 print(f"✅ Whisper ready on GPU (warm-up {time.perf_counter() - _t:.1f}s)")
 
 print("🔄 Loading RAG (Chroma + BM25)...")
@@ -347,7 +354,11 @@ def respond(transcript, origin, image_bytes=None, frame_from_camera=False):
             image_b64, out["frame"] = None, f"bad image: {e}"
     else:
         image_b64 = None
-    if image_b64:
+    if look and not image_b64 and needs_camera(transcript):
+        out.update(route="image", route_reason="camera question, no frame", answer=NO_FRAME_REPLY,
+                   pages=[], not_found=True,
+                   timings={"answer_s": round(time.perf_counter() - t0, 3)})
+    elif image_b64:
         with GPU_LOCK:
             if IMAGE_MODE == "B2":
                 r = image_pipeline.run_mode_b2_look(image_b64, transcript, RAG_MAX_TOKENS)

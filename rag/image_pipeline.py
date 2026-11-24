@@ -23,7 +23,8 @@ from PIL import Image, ImageOps
 
 import rag_query
 from nova_prompt import (B2_LOW_SCORE_REPLY, B2_USER, DESCRIBE_SYSTEM, DESCRIBE_USER,
-                         GENERAL_NOT_IN_MANUAL, GENERAL_VISION_PROMPT, MACHINE_RE,
+                         GENERAL_NOT_IN_MANUAL, IMAGE_RELATED_RE, LOOK_DESCRIBE_SYSTEM,
+                         LOOK_DESCRIBE_USER, MACHINE_RE,
                          MODE_A_QUESTION, NOVA_PROMPT, NOVA_VISION_PROMPT, NOVA_VISION_PROMPT_B2,
                          NOT_FOUND_REPLY, answer_pages, is_not_found, label_pages,
                          mentioned_pages, strip_page_mentions)
@@ -254,80 +255,92 @@ def run_mode_b2(image_b64, question, max_tokens, restore_text=True):
     return finish({**b, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "B2")
 
 
-LOOK_DESCRIBE_TOKENS = 120   # short description: it only feeds retrieval (speed matters live)
+LOOK_DESCRIBE_TOKENS = 70    # SPOKEN (~20-35 tokens) first, then some VISIBLE TEXT for retrieval
 
 
-GENERAL_TOKENS = 80            # 1-2 spoken sentences
+def _first_sentences(text, n=2):
+    parts = re.split(r"(?<=[.!?])\s+", text.strip())
+    return " ".join(parts[:n]).strip()
 
 
-def answer_general(image_b64, question, max_tokens=GENERAL_TOKENS):
-    """Camera question the manual can't answer: short answer from the image only."""
+def describe_look(image_b64, question, max_tokens=LOOK_DESCRIBE_TOKENS):
+    """Camera questions: ONE vision call -> a short spoken answer from the image only (used as
+    the general answer) + the visible text (used for retrieval)."""
     t0 = time.perf_counter()
     resp = _client().chat(
         model=VISION_MODEL, keep_alive=KEEP_ALIVE[VISION_MODEL],
-        messages=[{"role": "system", "content": GENERAL_VISION_PROMPT},
-                  {"role": "user", "content": question, "images": [image_b64]}],
+        messages=[{"role": "system", "content": LOOK_DESCRIBE_SYSTEM},
+                  {"role": "user", "content": LOOK_DESCRIBE_USER.format(question=question),
+                   "images": [image_b64]}],
         options={**OPTIONS, "temperature": TEMPERATURE, "num_predict": max_tokens})
     raw = _strip_think(resp["message"]["content"])
-    return {"general_raw": raw, "general_answer": strip_page_mentions(raw),
-            "general_usage": _usage(resp), "general_s": round(time.perf_counter() - t0, 3)}
+    m = re.search(r"SPOKEN:\s*(.*?)(?:\n\s*VISIBLE TEXT:|$)", raw, re.S | re.I)
+    spoken = m.group(1) if m else re.sub(r"(?im)^\s*(DESCRIPTION|VISIBLE TEXT):.*$", "", raw)
+    v = re.search(r"VISIBLE TEXT:\s*(.*)", raw, re.S | re.I)
+    return {"description": raw, "description_usage": _usage(resp),
+            "spoken": strip_page_mentions(_first_sentences(" ".join(spoken.split()))),
+            "visible_text": v.group(1).strip() if v else "",
+            "vision_s": round(time.perf_counter() - t0, 3)}
+
+
+def _restore(res, restore_text):
+    if restore_text:
+        s = use_only(TEXT_MODEL)
+        res["timings"]["swap_s"] = round(res["timings"]["swap_s"] + s, 3)
+        res["timings"]["total_s"] = round(res["timings"]["total_s"] + s, 3)
+    return res
 
 
 def run_mode_b2_look(image_b64, question, max_tokens, restore_text=True):
-    """Spoken camera questions (/live, ESP): the manual first (B2, with describe-retrieval for
-    vague questions), and if the manual has no answer, a general answer from the image only
-    (like the voice route's chat fallback): 1-2 sentences, no manual facts, no page numbers,
-    plus "I couldn't find that in the manual." when the question or image is about the machine."""
-    res = _b2_look_manual(image_b64, question, max_tokens, restore_text=False)
-    if res["not_found"]:
-        use_only(VISION_MODEL)
-        g = answer_general(image_b64, question)
-        about_machine = bool(MACHINE_RE.search(question) or MACHINE_RE.search(g["general_answer"])
-                             or MACHINE_RE.search(res.get("description", "")))
-        answer = g["general_answer"] or "I'm not sure what I'm looking at."
-        if about_machine:
-            answer = f"{answer} {GENERAL_NOT_IN_MANUAL}"
-        res.update(g, manual_answer=res["answer"], answer=answer, general=True,
-                   about_machine=about_machine, pages=[], mentioned_pages=[])
-        res["timings"]["vision_s"] = round(res["timings"]["vision_s"] + g["general_s"], 3)
-        res["timings"]["model_s"] = round(res["timings"]["model_s"] + g["general_s"], 3)
-        res["timings"]["total_s"] = round(res["timings"]["total_s"] + g["general_s"], 3)
-    else:
-        res["general"] = False
-    if restore_text:
-        res["timings"]["swap_s"] += use_only(TEXT_MODEL)
-    return res
-
-
-def _b2_look_manual(image_b64, question, max_tokens, restore_text=True):
-    """B2 for spoken camera questions. Vague questions ("What is this part?") give too weak a
-    retrieval on the question alone, so B2's gate stops them. Then: the vision model describes
-    the image, retrieval is redone on question + description (like Mode A), and B2 answers from
-    the image + those excerpts. The gate still applies to the new retrieval, so off-topic images
-    stay "not found". No extra swap in single-model mode."""
-    out = run_mode_b2(image_b64, question, max_tokens, restore_text=restore_text)
-    if not out.get("gated"):
-        out["look_fallback"] = False
-        return out
+    """Spoken camera questions (/live, ESP).
+    1. B2 on the question (manual answer + page). Vague questions ("What is this part?") are
+       stopped by B2's retrieval gate, and some questions just aren't in the manual.
+    2. Then ONE vision call (describe_look): a short spoken answer + the visible text.
+       If B2 was gated AND the image looks like the machine or its manual (visible text, or
+       machine/manual words in the description), retrieve again on question + description and
+       try B2 once more (the manual answer wins; the gate still applies). Off-topic images skip
+       this, so a general answer costs one vision call.
+    3. Otherwise the spoken description IS the answer (no extra call): 1-2 sentences, no manual
+       facts, page mentions stripped, plus "I couldn't find that in the manual." when the
+       question or the image is about the machine."""
+    first = run_mode_b2(image_b64, question, max_tokens, restore_text=False)
+    if not first["not_found"]:
+        first.update(look_fallback=False, general=False)
+        return _restore(first, restore_text)
     steps = {"to_vision_s": use_only(VISION_MODEL)}
-    d = describe(image_b64, question, min(max_tokens, LOOK_DESCRIBE_TOKENS))
-    t0 = time.perf_counter()
-    hits, scores = rag_query.retrieve_scored(f"{question}\n{d['description']}", TOP_K)
-    rag_s = round(time.perf_counter() - t0, 3)
-    if retrieval_ok(scores):
-        b = answer_b2(image_b64, question, max_tokens, retrieved=(hits, scores, rag_s))
-        b["vision_s"] = round(b["vision_s"] + d["vision_s"], 3)
-    else:
-        b = {"answer_raw": "", "answer": B2_LOW_SCORE_REPLY, "not_found": True, "gated": True,
-             "retrieved_pages": [], "retrieved": [], "scores": scores, "usage": {},
-             "done_reason": "gated", "rag_s": rag_s, "vision_s": d["vision_s"]}
-    if restore_text:
-        steps["to_text_s"] = use_only(TEXT_MODEL)
-    b["rag_s"] = round(b["rag_s"] + out["timings"]["rag_s"], 3)
-    res = finish({**b, "swap_s": round(sum(steps.values()), 3), "swap_steps": steps}, "B2")
-    res.update(look_fallback=True, description=d["description"],
-               first_scores=out["scores"])
-    return res
+    d = describe_look(image_b64, question)
+    vision_s = first["timings"]["vision_s"] + d["vision_s"]
+    rag_s = first["timings"]["rag_s"]
+    swap = round(first["timings"]["swap_s"] + sum(steps.values()), 3)
+    visible = "" if d["visible_text"].strip().lower().rstrip(".") in ("", "none") else d["visible_text"]
+    image_related = bool(visible or IMAGE_RELATED_RE.search(d["spoken"]))
+    if first.get("gated") and image_related:
+        t0 = time.perf_counter()
+        hits, scores = rag_query.retrieve_scored(f"{question}\n{d['description']}", TOP_K)
+        rs = round(time.perf_counter() - t0, 3)
+        rag_s += rs
+        if retrieval_ok(scores):
+            b = answer_b2(image_b64, question, max_tokens, retrieved=(hits, scores, rs))
+            vision_s += b["vision_s"]
+            if not b["not_found"]:
+                b.update(vision_s=round(vision_s, 3), rag_s=round(rag_s, 3))
+                res = finish({**b, "swap_s": swap, "swap_steps": steps}, "B2")
+                res.update(look_fallback=True, general=False, description=d["description"],
+                           first_scores=first["scores"])
+                return _restore(res, restore_text)
+    about = bool(MACHINE_RE.search(question) or MACHINE_RE.search(d["spoken"])
+                 or MACHINE_RE.search(d["visible_text"]))
+    answer = d["spoken"] or "I'm not sure what I'm looking at."
+    if about:
+        answer = f"{answer} {GENERAL_NOT_IN_MANUAL}"
+    res = finish({"answer_raw": d["description"], "answer": answer, "not_found": True,
+                  "gated": bool(first.get("gated")), "retrieved_pages": [], "retrieved": [],
+                  "scores": first["scores"], "usage": d["description_usage"],
+                  "done_reason": "general", "rag_s": round(rag_s, 3),
+                  "vision_s": round(vision_s, 3), "swap_s": swap, "swap_steps": steps}, "B2")
+    res.update(look_fallback=bool(first.get("gated")), general=True, about_machine=about,
+               description=d["description"], pages=[], mentioned_pages=[])
+    return _restore(res, restore_text)
 
 
 def run(image_b64, question, mode, max_tokens):
