@@ -92,6 +92,9 @@ def index_check():
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default="/mnt/c/Grad/to_send")
+    ap.add_argument("--model", default=LLM_MODEL, help="answer model (R1 = qwen3:8b; nothing else changes)")
+    ap.add_argument("--condition", default=CONDITION, help="condition label in records/meta, e.g. R2")
+    ap.add_argument("--stem", default=None, help="output file stem (default rag_R1 / rag_R1_ragpackage)")
     ap.add_argument("--set", default="benchmark", choices=("benchmark", "ragpackage"),
                     help="benchmark = 60 manifest questions (rag_R1.json); "
                          "ragpackage = 30 rag_package questions.csv (rag_R1_ragpackage.json)")
@@ -105,24 +108,24 @@ def main():
     if args.set == "benchmark":
         questions = load_benchmark_questions()
         assert len(questions) == 60, len(questions)
-        stem = "rag_R1"
+        stem = args.stem or "rag_R1"
     else:
         questions = load_ragpackage_questions()
         assert len(questions) == 30, len(questions)
-        stem = "rag_R1_ragpackage"
-    ask_rag("warm-up")
+        stem = args.stem or "rag_R1_ragpackage"
+    ask_rag("warm-up", model=args.model)
 
     records, started = {}, datetime.now(timezone.utc)
     for q in questions:
-        r = ask_rag(q["question"], k=TOP_K)
+        r = ask_rag(q["question"], k=TOP_K, model=args.model)
         records[q["question_id"]] = {
             "question_id": q["question_id"],
             "source": q["source"],
             "page": int(q["page"]) if q["page"] not in (None, "") else None,
             "image_id": None,
-            "condition": CONDITION,
+            "condition": args.condition,
             "prompt_id": "P03",
-            "model": LLM_MODEL,
+            "model": args.model,
             "answer_raw": r["content"],
             "answer_clean": clean_answer(r["content"]),
             "latency_seconds": round(r["latency_s"], 2),   # retrieval + generation
@@ -140,10 +143,10 @@ def main():
     lat = [x["latency_seconds"] for x in records.values()]
     p03 = load_prompt("P03")
     meta = {
-        CONDITION: {
+        args.condition: {
             "description": "Local RAG pipeline (text retrieval over the manual, no images)",
-            "model": LLM_MODEL,
-            "llm": ollama_model_info(LLM_MODEL),
+            "model": args.model,
+            "llm": ollama_model_info(args.model),
             "embedding_model": ollama_model_info(EMBED_MODEL),
             "think": False,
             "temperature": TEMPERATURE,
@@ -179,7 +182,7 @@ def main():
     }
     if args.set == "ragpackage":
         md_pkg = sha256(RAG_PACKAGE_MD)
-        meta[CONDITION].update({
+        meta[args.condition].update({
             "question_set": "rag_package questions.csv (30: 25 answerable + 5 trick)",
             "questions_file": str(QUESTIONS_PATH),
             "questions_sha256": sha256(QUESTIONS_PATH),
